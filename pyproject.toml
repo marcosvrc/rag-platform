@@ -9,7 +9,10 @@ description = "Self-service RAG platform for document ingestion, hybrid retrieva
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Proprietary" }
-dependencies = []
+dependencies = [
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.3,<3",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -69,12 +72,11 @@ addopts = """
 --cov-report=term-missing
 --cov-report=xml
 """
-# Nota: o gate de cobertura mínima (--cov-fail-under) é intencionalmente
-# omitido aqui em RAG-002. Com apps/packages/adapters ainda contendo apenas
-# módulos vazios (0 statements), qualquer percentual fixo seria artificial.
-# O relatório de cobertura já é gerado a cada execução (term-missing + XML);
-# o gate numérico (ver [tool.coverage.report].fail_under) entra em vigor a
-# partir do primeiro código de aplicação real (RAG-010 em diante).
+# O gate de cobertura mínima vem de [tool.coverage.report].fail_under
+# (pytest-cov usa esse valor quando --cov-fail-under não é passado aqui).
+# Definido em RAG-002 como 0 (código ainda só tinha módulos vazios) e
+# elevado para 85 em RAG-004, quando o primeiro código de aplicação real
+# (packages/config/settings.py) passou a existir.
 
 [tool.coverage.run]
 branch = true
@@ -82,7 +84,7 @@ source = ["apps", "packages", "adapters"]
 
 [tool.coverage.report]
 skip_empty = true
-fail_under = 0  # ver nota em [tool.pytest.ini_options].addopts; elevar para 85 a partir de RAG-010.
+fail_under = 85  # elevado em RAG-004: packages/config/settings.py é o primeiro código real (100% coberto).
 exclude_lines = [
     "pragma: no cover",
     "if __name__ == .__main__.:",
