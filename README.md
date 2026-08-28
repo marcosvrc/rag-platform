@@ -14,6 +14,8 @@ Concluído até o momento:
   configuração Python de base).
 - **RAG-002 — Padronizar qualidade de código** (Ruff, Mypy, Pytest e
   cobertura).
+- **RAG-003 — Criar Docker Compose local** (PostgreSQL/pgvector, Redis,
+  MinIO e stack de observabilidade).
 
 ## Desenvolvimento local
 
@@ -38,6 +40,34 @@ artificial. O gate será elevado (baseline planejada: 85%) a partir da
 primeira atividade que introduzir código de aplicação real (RAG-010 em
 diante).
 
-A configuração completa de ambiente de execução (variáveis, serviços de
-infraestrutura via Docker Compose, banco de dados etc.) é adicionada nas
-próximas atividades do backlog (RAG-003 em diante).
+## Serviços locais (RAG-003)
+
+```bash
+cp .env.example .env   # opcional: ajuste credenciais/portas
+docker compose up -d
+docker compose ps      # aguarde todos os serviços ficarem "healthy"
+```
+
+| Serviço | Imagem | Porta padrão | Credenciais (dev) |
+| --- | --- | --- | --- |
+| PostgreSQL + pgvector | `pgvector/pgvector:pg16` | `5432` | `rag_platform` / `rag_platform_local_only` |
+| Redis | `redis:7.2-alpine` | `6379` | — |
+| MinIO (API / console) | `minio/minio` | `9000` / `9001` | `rag_platform` / `rag_platform_local_only` |
+| OpenTelemetry Collector (gRPC / HTTP / métricas) | `otel/opentelemetry-collector-contrib` | `4317` / `4318` / `8889` | — |
+| Prometheus | `prom/prometheus` | `9090` | — |
+| Grafana | `grafana/grafana` | `3000` | `admin` / `rag_platform_local_only` |
+
+Todas as portas e credenciais são configuráveis via `.env` (ver
+`.env.example`) e nunca devem ser reaproveitadas fora do ambiente local.
+Os dados de cada serviço são persistidos em volumes Docker nomeados
+(`postgres_data`, `redis_data`, `minio_data`, `prometheus_data`,
+`grafana_data`); `docker compose down -v` remove tudo, inclusive os dados.
+
+O Grafana já vem com o Prometheus provisionado como datasource; dashboards
+específicos da aplicação são adicionados em RAG-053. A extensão `vector`
+do PostgreSQL e as migrations do schema são responsabilidade de RAG-006 —
+neste momento a imagem apenas a disponibiliza, sem criá-la.
+
+A validação de configuração completa da aplicação (Pydantic Settings) é
+entregue em RAG-004; a API e os workers que efetivamente usam estes
+serviços chegam a partir de RAG-005.

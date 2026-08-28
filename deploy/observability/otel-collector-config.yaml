@@ -1,0 +1,29 @@
+# Configuração mínima do OpenTelemetry Collector para desenvolvimento local
+# (RAG-003). Recebe traces/métricas/logs via OTLP (gRPC 4317 / HTTP 4318) da
+# API e dos workers (instrumentação real chega em RAG-052) e expõe métricas
+# no formato Prometheus em :8889 para o Prometheus coletar.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  debug:
+    verbosity: basic
+  prometheus:
+    endpoint: 0.0.0.0:8889
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      exporters: [prometheus, debug]
+    logs:
+      receivers: [otlp]
+      exporters: [debug]
