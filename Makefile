@@ -5,7 +5,7 @@ PYTHON ?= python3.12
 VENV := .venv
 BIN := $(VENV)/bin
 
-.PHONY: venv install lint format test clean
+.PHONY: venv install lint format typecheck test check clean
 
 venv:
 	$(PYTHON) -m venv $(VENV)
@@ -21,8 +21,16 @@ format:
 	$(BIN)/ruff format .
 	$(BIN)/ruff check --fix .
 
+typecheck:
+	$(BIN)/mypy apps packages adapters tests
+
 test:
 	$(BIN)/pytest
 
+# "Pipeline" local completo: o mesmo conjunto de verificações que o CI
+# (RAG-070+) deve reproduzir. Falha se lint, tipos, testes ou cobertura
+# mínima (85%, ver [tool.coverage.report] em pyproject.toml) não passarem.
+check: lint typecheck test
+
 clean:
-	rm -rf $(VENV) .pytest_cache .ruff_cache **/__pycache__
+	rm -rf $(VENV) .pytest_cache .ruff_cache .mypy_cache .coverage coverage.xml **/__pycache__
