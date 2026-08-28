@@ -1,0 +1,11 @@
+# Provisionamento automático do datasource Prometheus no Grafana
+# (RAG-003). Dashboards básicos são adicionados em RAG-053.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
