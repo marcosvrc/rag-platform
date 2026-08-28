@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# macOS
+.DS_Store
+
+# Local scratch folder used to stage files this environment could not
+# delete directly (FUSE bridge does not allow unlink on this mount).
+_to_delete/
