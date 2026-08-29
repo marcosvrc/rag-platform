@@ -422,6 +422,43 @@ A validação de configuração completa da aplicação (Pydantic Settings) é
 entregue em RAG-004; a API e os workers que efetivamente usam estes
 serviços chegam a partir de RAG-005.
 
+## Upload de documentos (RAG-021)
+
+`POST /v1/knowledge-bases/{knowledge_base_id}/documents` (multipart,
+campo `file`) implementa os passos 1-5 do fluxo de indexação (seção 11
+do plano): valida extensão/MIME type/tamanho, calcula SHA-256, detecta
+duplicidade, armazena o arquivo original (`ObjectStoragePort`, RAG-020)
+e cria `Document` (`PENDING`) + `DocumentVersion` (v1) + `IndexJob`
+(`INDEX`, `PENDING`) numa única transação — devolve `202 Accepted`. O
+passo 6 (publicar o job numa fila real) é RAG-022; aqui o job só fica
+persistido como pendente.
+
+Formatos aceitos (fixos, seção 2 do plano — não configuráveis por
+ambiente): PDF, Markdown, TXT e DOCX; a extensão do arquivo precisa
+corresponder ao `Content-Type` declarado. `DOCUMENT_MAX_SIZE_BYTES`
+(`.env`, padrão 50 MiB) limita o tamanho — ambos violam com `422`.
+
+**Duplicidade**: um checksum já usado (não excluído) na mesma base
+retorna `409`. **Idempotência** (seção 8: "endpoints de criação devem
+aceitar Idempotency-Key"): o cabeçalho `Idempotency-Key` faz uma
+repetição da mesma requisição (mesmo nome/tipo/conteúdo) devolver o
+mesmo documento/versão/job já criados, sem duplicar nada; a mesma chave
+reusada para uma requisição diferente retorna `409`. O mapeamento vive
+em `document_idempotency_keys` (migration 0003) — não é uma entidade de
+domínio, é infraestrutura da aplicação.
+
+`packages/application/ports/document_repository.py` define
+`DocumentRepositoryPort`; `adapters/document_repository/postgres.py`
+documenta a limitação conhecida sob corrida genuína de
+`Idempotency-Key` (o caminho comum — retry sequencial — funciona
+corretamente; uma corrida verdadeiramente simultânea pode deixar um
+documento órfão, embora a resposta HTTP nunca divirja entre as duas
+requisições).
+
+Testes: `tests/unit/test_document_repository_in_memory.py` (contrato
+da porta), `tests/unit/test_document_upload_command.py` (validação,
+duplicidade, idempotência) e `tests/unit/test_document_router.py`
+(visão HTTP, isolamento por tenant).
 ## Autenticação JWT (RAG-050)
 
 `packages/application/ports/token_verifier.py` define `TokenVerifierPort`

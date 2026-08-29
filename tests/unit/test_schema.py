@@ -25,7 +25,15 @@ from sqlalchemy import CheckConstraint, UniqueConstraint
 import adapters.postgres.models  # noqa: F401 — registra as tabelas em Base.metadata
 from adapters.postgres.base import Base
 
-TENANT_SCOPED_TABLES = {"knowledge_bases", "chunks", "query_logs"}
+TENANT_SCOPED_TABLES = {
+    "knowledge_bases",
+    "chunks",
+    "query_logs",
+    # document_idempotency_keys não é uma entidade de domínio (RAG-021,
+    # migration 0003) mas carrega tenant_id direto, então a mesma
+    # verificação de isolamento vale para ela.
+    "document_idempotency_keys",
+}
 
 
 def _indexed_columns(table_name: str) -> set[str]:
@@ -94,6 +102,13 @@ def test_foreign_keys_reference_the_expected_tables() -> None:
         "query_logs": {"tenants.id", "knowledge_bases.id"},
         "query_evidences": {"query_logs.id", "chunks.id"},
         "feedbacks": {"query_logs.id"},
+        "document_idempotency_keys": {
+            "tenants.id",
+            "knowledge_bases.id",
+            "documents.id",
+            "document_versions.id",
+            "index_jobs.id",
+        },
     }
     for table_name, expected_targets in expected.items():
         table = Base.metadata.tables[table_name]
@@ -118,6 +133,7 @@ def test_unique_constraints_enforce_expected_natural_keys() -> None:
         "documents": {"knowledge_base_id", "checksum"},
         "document_versions": {"document_id", "version"},
         "query_evidences": {"query_id", "position"},
+        "document_idempotency_keys": {"tenant_id", "knowledge_base_id", "idempotency_key"},
     }
     for table_name, expected_columns in expected_unique_columns.items():
         table = Base.metadata.tables[table_name]

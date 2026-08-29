@@ -41,12 +41,16 @@ def configured_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_base_metadata_registers_all_core_tables(configured_env: None) -> None:
     """RAG-006 só cria a infraestrutura; as tabelas do modelo mínimo
-    (seção 9 do plano) chegam em RAG-011, uma por entidade de RAG-010."""
+    (seção 9 do plano) chegam em RAG-011, uma por entidade de RAG-010.
+    `document_idempotency_keys` é a exceção: não é uma entidade de
+    domínio, é infraestrutura de aplicação para Idempotency-Key
+    (RAG-021, migration 0003)."""
     assert set(Base.metadata.tables) == {
         "tenants",
         "knowledge_bases",
         "documents",
         "document_versions",
+        "document_idempotency_keys",
         "chunks",
         "index_jobs",
         "query_logs",
@@ -83,18 +87,21 @@ def test_get_session_factory_is_bound_to_the_cached_engine(configured_env: None)
 def test_migrations_have_a_single_well_formed_head() -> None:
     """Valida a árvore de revisões do Alembic offline (sem conectar a
     nenhum banco): garante que existe uma única head, alcançável a
-    partir da base, e que ela é a migration 0002 (schema inicial,
-    RAG-011), encadeada corretamente depois da 0001 (pgvector)."""
+    partir da base, e que ela é a migration 0003 (document_idempotency_keys,
+    RAG-021), encadeada corretamente depois da 0002 (schema inicial,
+    RAG-011) e da 0001 (pgvector)."""
     config = Config(str(REPO_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
     script = ScriptDirectory.from_config(config)
 
     heads = script.get_heads()
-    assert heads == ["0002"]
+    assert heads == ["0003"]
 
     revisions = list(script.walk_revisions())
-    assert [r.revision for r in revisions] == ["0002", "0001"]
-    assert revisions[0].down_revision == "0001"
-    assert revisions[1].down_revision is None
-    assert "core schema" in (revisions[0].doc or "")
-    assert "pgvector" in (revisions[1].doc or "")
+    assert [r.revision for r in revisions] == ["0003", "0002", "0001"]
+    assert revisions[0].down_revision == "0002"
+    assert revisions[1].down_revision == "0001"
+    assert revisions[2].down_revision is None
+    assert "document_idempotency_keys" in (revisions[0].doc or "")
+    assert "core schema" in (revisions[1].doc or "")
+    assert "pgvector" in (revisions[2].doc or "")

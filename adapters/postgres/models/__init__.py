@@ -13,6 +13,7 @@ pgvector diretamente é o motivo de eles existirem aqui, em `adapters/`.
 
 from adapters.postgres.models.chunk import ChunkModel
 from adapters.postgres.models.document import DocumentModel
+from adapters.postgres.models.document_idempotency_key import DocumentIdempotencyKeyModel
 from adapters.postgres.models.document_version import DocumentVersionModel
 from adapters.postgres.models.evaluation_run import EvaluationRunModel
 from adapters.postgres.models.feedback import FeedbackModel
@@ -24,6 +25,7 @@ from adapters.postgres.models.tenant import TenantModel
 
 __all__ = [
     "ChunkModel",
+    "DocumentIdempotencyKeyModel",
     "DocumentModel",
     "DocumentVersionModel",
     "EvaluationRunModel",
