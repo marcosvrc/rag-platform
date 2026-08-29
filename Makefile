@@ -5,7 +5,7 @@ PYTHON ?= python3.12
 VENV := .venv
 BIN := $(VENV)/bin
 
-.PHONY: venv install lint format typecheck test check clean
+.PHONY: venv install lint format typecheck test run-api check clean
 
 venv:
 	$(PYTHON) -m venv $(VENV)
@@ -26,6 +26,9 @@ typecheck:
 
 test:
 	$(BIN)/pytest
+
+run-api:
+	$(BIN)/uvicorn apps.api.main:app --reload --port 8000
 
 # "Pipeline" local completo: o mesmo conjunto de verificações que o CI
 # (RAG-070+) deve reproduzir. Falha se lint, tipos, testes ou cobertura
