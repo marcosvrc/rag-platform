@@ -34,10 +34,11 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from adapters.postgres.models.chunk import ChunkModel
 from adapters.postgres.models.document import DocumentModel
 from adapters.postgres.models.document_idempotency_key import DocumentIdempotencyKeyModel
 from adapters.postgres.models.document_version import DocumentVersionModel
@@ -47,6 +48,7 @@ from packages.application.ports.document_repository import (
     DocumentRepositoryPort,
     DocumentUpload,
 )
+from packages.domain.entities.chunk import Chunk
 from packages.domain.entities.document import Document
 from packages.domain.entities.document_version import DocumentVersion
 from packages.domain.entities.index_job import IndexJob
@@ -255,6 +257,87 @@ class PostgresDocumentRepository(DocumentRepositoryPort):
             .values(status=ProcessingStatus.SUCCEEDED, updated_at=datetime.now(UTC))
         )
         await self._session.execute(stmt)
+        await self._session.commit()
+
+    async def get_index_job(self, *, index_job_id: UUID) -> IndexJob | None:
+        model = await self._session.get(IndexJobModel, index_job_id)
+        return _job_to_entity(model) if model is not None else None
+
+    async def get_document(self, *, document_id: UUID) -> Document | None:
+        model = await self._session.get(DocumentModel, document_id)
+        return _document_to_entity(model) if model is not None else None
+
+    async def get_latest_version(self, *, document_id: UUID) -> DocumentVersion | None:
+        stmt = (
+            select(DocumentVersionModel)
+            .where(DocumentVersionModel.document_id == document_id)
+            .order_by(DocumentVersionModel.version.desc())
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
+        model = result.scalar_one_or_none()
+        return _version_to_entity(model) if model is not None else None
+
+    async def mark_document_processing(self, *, document_id: UUID) -> None:
+        # WHERE ... status != PROCESSING garante idempotencia a nivel de
+        # SQL: PROCESSING -> PROCESSING nao e uma transicao valida na
+        # maquina de estados (packages/domain/entities/document.py), entao
+        # o guard evita levantar InvalidStatusTransitionError num
+        # reprocessamento (RAG-026, "reprocessamento e idempotente").
+        stmt = (
+            update(DocumentModel)
+            .where(
+                DocumentModel.id == document_id,
+                DocumentModel.status != DocumentStatus.PROCESSING,
+            )
+            .values(status=DocumentStatus.PROCESSING)
+        )
+        await self._session.execute(stmt)
+        await self._session.commit()
+
+    async def persist_chunks_and_activate_version(
+        self,
+        *,
+        document_id: UUID,
+        version_id: UUID,
+        extracted_object_key: str,
+        chunks: list[Chunk],
+    ) -> None:
+        # Tudo num único commit: índice parcial nunca fica ativo (RAG-026)
+        # — se qualquer passo falhar antes do commit, nada muda no banco e
+        # a versão anterior (se houver) continua sendo a ativa/consultável.
+        #
+        # DELETE + INSERT (em vez de diffing) torna reprocessamento
+        # idempotente: repetir esta chamada para a mesma version_id nunca
+        # duplica chunks, só substitui o conjunto inteiro pelo mais recente.
+        await self._session.execute(delete(ChunkModel).where(ChunkModel.version_id == version_id))
+        self._session.add_all(
+            [
+                ChunkModel(
+                    id=chunk.id,
+                    tenant_id=chunk.tenant_id,
+                    knowledge_base_id=chunk.knowledge_base_id,
+                    version_id=chunk.version_id,
+                    content=chunk.content,
+                    token_count=chunk.token_count,
+                    page=chunk.page,
+                    section=chunk.section,
+                    metadata_=chunk.metadata,
+                    embedding=chunk.embedding,
+                )
+                for chunk in chunks
+            ]
+        )
+        await self._session.execute(
+            update(DocumentVersionModel)
+            .where(DocumentVersionModel.id == version_id)
+            .values(extracted_object_key=extracted_object_key)
+        )
+        await self._session.execute(
+            update(DocumentModel)
+            .where(DocumentModel.id == document_id)
+            .values(status=DocumentStatus.INDEXED, active_version_id=version_id)
+        )
         await self._session.commit()
 
     async def mark_index_job_failed(

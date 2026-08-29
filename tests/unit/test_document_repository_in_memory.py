@@ -2,12 +2,18 @@
 contrato da porta (`DocumentRepositoryPort`) que o adapter Postgres
 real, incluindo o ciclo de vida do `IndexJob` (RAG-022)."""
 
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
 
 from adapters.document_repository.in_memory import InMemoryDocumentRepository
-from packages.application.ports.document_repository import DocumentChecksumConflictError
+from packages.application.ports.document_repository import (
+    DocumentChecksumConflictError,
+    DocumentUpload,
+)
+from packages.domain.entities.chunk import Chunk
+from packages.domain.entities.document_version import DocumentVersion
 from packages.domain.enums.document_status import DocumentStatus
 from packages.domain.enums.index_job_type import IndexJobType
 from packages.domain.enums.processing_status import ProcessingStatus
@@ -253,3 +259,206 @@ class TestIndexJobLifecycle:
         job = repository._jobs[index_job_id]
         assert job.status == ProcessingStatus.FAILED
         assert job.attempts == 5
+
+
+class TestRag026PersistChunksAndActivateVersion:
+    """RAG-026: getters auxiliares do worker (`get_index_job`,
+    `get_document`, `get_latest_version`), `mark_document_processing`
+    (idempotente) e `persist_chunks_and_activate_version` (atômico e
+    idempotente)."""
+
+    async def test_get_index_job_returns_none_for_unknown_id(
+        self, repository: InMemoryDocumentRepository
+    ) -> None:
+        assert await repository.get_index_job(index_job_id=uuid4()) is None
+
+    async def test_get_index_job_returns_the_job(
+        self, repository: InMemoryDocumentRepository
+    ) -> None:
+        index_job_id = await _create_index_job(repository)
+        job = await repository.get_index_job(index_job_id=index_job_id)
+        assert job is not None
+        assert job.id == index_job_id
+
+    async def test_get_document_returns_none_for_unknown_id(
+        self, repository: InMemoryDocumentRepository
+    ) -> None:
+        assert await repository.get_document(document_id=uuid4()) is None
+
+    async def test_get_document_returns_the_document(
+        self, repository: InMemoryDocumentRepository
+    ) -> None:
+        upload = await repository.create_document(
+            tenant_id=TENANT_ID,
+            knowledge_base_id=KNOWLEDGE_BASE_ID,
+            name="guia.pdf",
+            mime_type="application/pdf",
+            checksum="c" * 64,
+            object_key="kb/checksum/guia.pdf",
+            idempotency_key=None,
+        )
+        found = await repository.get_document(document_id=upload.document.id)
+        assert found is not None
+        assert found.id == upload.document.id
+
+    async def test_get_latest_version_returns_none_when_document_has_no_versions(
+        self, repository: InMemoryDocumentRepository
+    ) -> None:
+        assert await repository.get_latest_version(document_id=uuid4()) is None
+
+    async def test_get_latest_version_returns_the_highest_version_number(
+        self, repository: InMemoryDocumentRepository
+    ) -> None:
+        upload = await repository.create_document(
+            tenant_id=TENANT_ID,
+            knowledge_base_id=KNOWLEDGE_BASE_ID,
+            name="guia.pdf",
+            mime_type="application/pdf",
+            checksum="d" * 64,
+            object_key="kb/checksum/guia.pdf",
+            idempotency_key=None,
+        )
+        # Simula uma segunda versão sendo criada por uma reindexação futura
+        # (RAG-027 ainda não existe) inserindo diretamente no fake.
+        newer = DocumentVersion(
+            id=uuid4(),
+            document_id=upload.document.id,
+            version=2,
+            object_key="kb/checksum/guia-v2.pdf",
+            created_at=datetime.now(UTC),
+        )
+        repository._versions[newer.id] = newer
+
+        latest = await repository.get_latest_version(document_id=upload.document.id)
+        assert latest is not None
+        assert latest.version == 2
+        assert latest.id == newer.id
+
+    async def test_mark_document_processing_transitions_pending_to_processing(
+        self, repository: InMemoryDocumentRepository
+    ) -> None:
+        upload = await repository.create_document(
+            tenant_id=TENANT_ID,
+            knowledge_base_id=KNOWLEDGE_BASE_ID,
+            name="guia.pdf",
+            mime_type="application/pdf",
+            checksum="e" * 64,
+            object_key="kb/checksum/guia.pdf",
+            idempotency_key=None,
+        )
+
+        await repository.mark_document_processing(document_id=upload.document.id)
+
+        document = await repository.get_document(document_id=upload.document.id)
+        assert document is not None
+        assert document.status == DocumentStatus.PROCESSING
+
+    async def test_mark_document_processing_is_idempotent_when_already_processing(
+        self, repository: InMemoryDocumentRepository
+    ) -> None:
+        upload = await repository.create_document(
+            tenant_id=TENANT_ID,
+            knowledge_base_id=KNOWLEDGE_BASE_ID,
+            name="guia.pdf",
+            mime_type="application/pdf",
+            checksum="f" * 64,
+            object_key="kb/checksum/guia.pdf",
+            idempotency_key=None,
+        )
+        await repository.mark_document_processing(document_id=upload.document.id)
+
+        # Não deve levantar InvalidStatusTransitionError na segunda chamada
+        # (PROCESSING -> PROCESSING não é uma transição válida da FSM, mas
+        # este método é especificamente idempotente).
+        await repository.mark_document_processing(document_id=upload.document.id)
+
+        document = await repository.get_document(document_id=upload.document.id)
+        assert document is not None
+        assert document.status == DocumentStatus.PROCESSING
+
+    async def test_mark_document_processing_is_a_noop_for_unknown_document(
+        self, repository: InMemoryDocumentRepository
+    ) -> None:
+        # Defensivo: não deve levantar KeyError.
+        await repository.mark_document_processing(document_id=uuid4())
+
+    async def _prepare_processing_document(
+        self, repository: InMemoryDocumentRepository, *, checksum: str
+    ) -> DocumentUpload:
+        upload = await repository.create_document(
+            tenant_id=TENANT_ID,
+            knowledge_base_id=KNOWLEDGE_BASE_ID,
+            name="guia.pdf",
+            mime_type="application/pdf",
+            checksum=checksum,
+            object_key="kb/checksum/guia.pdf",
+            idempotency_key=None,
+        )
+        await repository.mark_document_processing(document_id=upload.document.id)
+        return upload
+
+    def _make_chunk(self, *, version_id: UUID, content: str) -> Chunk:
+        return Chunk(
+            id=uuid4(),
+            tenant_id=TENANT_ID,
+            knowledge_base_id=KNOWLEDGE_BASE_ID,
+            version_id=version_id,
+            content=content,
+            token_count=3,
+            page=None,
+            section=None,
+            metadata={},
+            embedding=[0.1, 0.2, 0.3],
+        )
+
+    async def test_persist_chunks_and_activate_version_activates_document_and_version(
+        self, repository: InMemoryDocumentRepository
+    ) -> None:
+        upload = await self._prepare_processing_document(repository, checksum="1" * 64)
+        chunk = self._make_chunk(version_id=upload.version.id, content="olá mundo")
+
+        await repository.persist_chunks_and_activate_version(
+            document_id=upload.document.id,
+            version_id=upload.version.id,
+            extracted_object_key="kb/doc/v1/extracted.md",
+            chunks=[chunk],
+        )
+
+        document = await repository.get_document(document_id=upload.document.id)
+        version = await repository.get_latest_version(document_id=upload.document.id)
+        assert document is not None
+        assert document.status == DocumentStatus.INDEXED
+        assert document.active_version_id == upload.version.id
+        assert version is not None
+        assert version.extracted_object_key == "kb/doc/v1/extracted.md"
+        assert repository.chunks_for_version(version_id=upload.version.id) == [chunk]
+
+    async def test_persist_chunks_and_activate_version_is_idempotent_and_never_duplicates(
+        self, repository: InMemoryDocumentRepository
+    ) -> None:
+        upload = await self._prepare_processing_document(repository, checksum="2" * 64)
+        first_chunk = self._make_chunk(version_id=upload.version.id, content="primeira versão")
+
+        await repository.persist_chunks_and_activate_version(
+            document_id=upload.document.id,
+            version_id=upload.version.id,
+            extracted_object_key="kb/doc/v1/extracted.md",
+            chunks=[first_chunk],
+        )
+
+        # Reprocessamento: chunks diferentes para a MESMA version_id.
+        await repository.mark_document_processing(document_id=upload.document.id)
+        second_chunk = self._make_chunk(version_id=upload.version.id, content="reprocessado")
+        await repository.persist_chunks_and_activate_version(
+            document_id=upload.document.id,
+            version_id=upload.version.id,
+            extracted_object_key="kb/doc/v1/extracted.md",
+            chunks=[second_chunk],
+        )
+
+        stored = repository.chunks_for_version(version_id=upload.version.id)
+        assert stored == [second_chunk]
+
+        document = await repository.get_document(document_id=upload.document.id)
+        assert document is not None
+        assert document.status == DocumentStatus.INDEXED

@@ -106,6 +106,10 @@ class PostgresKnowledgeBaseRepository(KnowledgeBaseRepositoryPort):
         model = await self._get_model(tenant_id=tenant_id, knowledge_base_id=knowledge_base_id)
         return _to_entity(model) if model is not None else None
 
+    async def get_by_id_unscoped(self, *, knowledge_base_id: UUID) -> KnowledgeBase | None:
+        model = await self._session.get(KnowledgeBaseModel, knowledge_base_id)
+        return _to_entity(model) if model is not None else None
+
     async def list_by_tenant(
         self, *, tenant_id: UUID, limit: int, cursor: str | None
     ) -> KnowledgeBasePage:

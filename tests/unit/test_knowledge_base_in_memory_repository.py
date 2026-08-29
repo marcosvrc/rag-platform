@@ -190,3 +190,32 @@ async def test_create_after_soft_delete_reuses_the_name(
     )
     assert recreated.id != kb.id
     assert recreated.status == KnowledgeBaseStatus.ACTIVE
+
+
+async def test_get_by_id_unscoped_returns_active_knowledge_base_without_tenant_filter(
+    repository: InMemoryKnowledgeBaseRepository,
+) -> None:
+    kb = await repository.create(tenant_id=TENANT_A, name="Manuais", description=None, config={})
+
+    found = await repository.get_by_id_unscoped(knowledge_base_id=kb.id)
+
+    assert found is not None
+    assert found.id == kb.id
+
+
+async def test_get_by_id_unscoped_returns_none_for_unknown_id(
+    repository: InMemoryKnowledgeBaseRepository,
+) -> None:
+    assert await repository.get_by_id_unscoped(knowledge_base_id=uuid4()) is None
+
+
+async def test_get_by_id_unscoped_returns_deleted_knowledge_bases_too(
+    repository: InMemoryKnowledgeBaseRepository,
+) -> None:
+    kb = await repository.create(tenant_id=TENANT_A, name="Manuais", description=None, config={})
+    await repository.soft_delete(tenant_id=TENANT_A, knowledge_base_id=kb.id)
+
+    found = await repository.get_by_id_unscoped(knowledge_base_id=kb.id)
+
+    assert found is not None
+    assert found.status == KnowledgeBaseStatus.DELETED
