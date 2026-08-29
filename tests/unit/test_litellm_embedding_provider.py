@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from unittest.mock import MagicMock
 
 import httpx
 import pytest
@@ -218,3 +219,32 @@ async def test_embed_sends_authorization_header_when_api_key_is_configured() -> 
     await provider.embed(texts=["a"])
 
     assert captured["authorization"] == "Bearer secret-token"
+
+
+async def test_embed_records_a_metric_with_the_text_count_and_duration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_embedding_response(2))
+
+    fake_record = MagicMock()
+    monkeypatch.setattr(embedding_provider_module, "record_embedding_batch", fake_record)
+    provider = _provider(_make_settings(), _handler)
+
+    await provider.embed(texts=["a", "b"])
+
+    fake_record.assert_called_once()
+    assert fake_record.call_args.kwargs["text_count"] == 2
+    assert fake_record.call_args.kwargs["duration_seconds"] >= 0.0
+
+
+async def test_embed_does_not_record_a_metric_for_an_empty_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_record = MagicMock()
+    monkeypatch.setattr(embedding_provider_module, "record_embedding_batch", fake_record)
+    provider = _provider(_make_settings(), lambda request: httpx.Response(200, json={"data": []}))
+
+    await provider.embed(texts=[])
+
+    fake_record.assert_not_called()

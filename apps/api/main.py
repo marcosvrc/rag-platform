@@ -9,6 +9,7 @@ from fastapi import FastAPI
 
 from apps.api.errors import register_error_handlers
 from apps.api.routers import documents, health, jobs, knowledge_bases
+from packages.observability.metrics import configure_metrics
 from packages.observability.tracing import configure_tracing, instrument_fastapi_app
 
 
@@ -30,6 +31,7 @@ def create_app() -> FastAPI:
     # importam esta app sem nenhuma variável de ambiente de negócio
     # configurada.
     configure_tracing(service_name="rag-platform-api")
+    configure_metrics(service_name="rag-platform-api")
     instrument_fastapi_app(app)
     return app
 

@@ -17,6 +17,7 @@ verificado.
 import asyncio
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 import httpx
@@ -25,6 +26,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
+import apps.api.routers.documents as documents_router
 from adapters.audit_log.in_memory import InMemoryAuditLog
 from adapters.document_repository.in_memory import InMemoryDocumentRepository
 from adapters.knowledge_base_repository.in_memory import InMemoryKnowledgeBaseRepository
@@ -430,3 +432,47 @@ class TestAuditLog:
         assert event.action == "document.reindex"
         assert event.resource_type == "document"
         assert str(event.resource_id) == document_id
+
+
+class TestMetrics:
+    """RAG-053: enviar/reindexar documento registra uma métrica de
+    consumo (dublada — a lógica de `record_document_uploaded`/
+    `record_document_reindexed` em si é testada em
+    tests/unit/test_metrics.py)."""
+
+    def test_upload_records_a_document_uploaded_metric(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        knowledge_base_id = _create_knowledge_base(client)
+        fake_record = MagicMock()
+        monkeypatch.setattr(documents_router, "record_document_uploaded", fake_record)
+
+        _upload_pdf(client, knowledge_base_id)
+
+        fake_record.assert_called_once_with(mime_type="application/pdf")
+
+    def test_reindex_records_a_document_reindexed_metric(
+        self,
+        client: TestClient,
+        document_repository: InMemoryDocumentRepository,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        knowledge_base_id = _create_knowledge_base(client)
+        upload_response = _upload_pdf(client, knowledge_base_id)
+        document_id = upload_response.json()["document_id"]
+        version = asyncio.run(document_repository.get_latest_version(document_id=UUID(document_id)))
+        assert version is not None
+        asyncio.run(
+            _index_document(
+                document_repository, document_id=UUID(document_id), version_id=version.id
+            )
+        )
+        fake_record = MagicMock()
+        monkeypatch.setattr(documents_router, "record_document_reindexed", fake_record)
+
+        client.post(
+            f"/v1/knowledge-bases/{knowledge_base_id}/documents/{document_id}/reindex",
+            headers=_headers(),
+        )
+
+        fake_record.assert_called_once_with()

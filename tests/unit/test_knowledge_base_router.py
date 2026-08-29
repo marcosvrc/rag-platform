@@ -17,6 +17,7 @@ base do tenant B.
 
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import jwt
@@ -24,6 +25,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
+import apps.api.routers.knowledge_bases as knowledge_bases_router
 from adapters.audit_log.in_memory import InMemoryAuditLog
 from adapters.knowledge_base_repository.in_memory import InMemoryKnowledgeBaseRepository
 from apps.api import main
@@ -369,3 +371,50 @@ class TestAuditLog:
         assert len(audit_log.events) == 1
         assert audit_log.events[0].action == "knowledge_base.delete"
         assert str(audit_log.events[0].resource_id) == created["id"]
+
+
+class TestMetrics:
+    """RAG-053: criar/atualizar/excluir base de conhecimento registra
+    uma métrica de consumo com a ação correta (dublada — a lógica de
+    `record_knowledge_base_mutation` em si é testada em
+    tests/unit/test_metrics.py)."""
+
+    def test_create_records_a_mutation_metric(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake_record = MagicMock()
+        monkeypatch.setattr(knowledge_bases_router, "record_knowledge_base_mutation", fake_record)
+
+        client.post("/v1/knowledge-bases", json={"name": "Manuais"}, headers=_headers())
+
+        fake_record.assert_called_once_with(action="create")
+
+    def test_update_records_a_mutation_metric(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        created = client.post(
+            "/v1/knowledge-bases", json={"name": "Manuais"}, headers=_headers()
+        ).json()
+        fake_record = MagicMock()
+        monkeypatch.setattr(knowledge_bases_router, "record_knowledge_base_mutation", fake_record)
+
+        client.patch(
+            f"/v1/knowledge-bases/{created['id']}",
+            json={"description": "nova"},
+            headers=_headers(),
+        )
+
+        fake_record.assert_called_once_with(action="update")
+
+    def test_delete_records_a_mutation_metric(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        created = client.post(
+            "/v1/knowledge-bases", json={"name": "Manuais"}, headers=_headers()
+        ).json()
+        fake_record = MagicMock()
+        monkeypatch.setattr(knowledge_bases_router, "record_knowledge_base_mutation", fake_record)
+
+        client.delete(f"/v1/knowledge-bases/{created['id']}", headers=_headers())
+
+        fake_record.assert_called_once_with(action="delete")

@@ -8,11 +8,16 @@ uma função pura de aplicação — nunca em `apps/indexing_worker/tasks.py`
 desacoplamento da seção 5.1 do plano: a aplicação não conhece Celery).
 A task Celery (`apps/indexing_worker/tasks.py`) é só um adapter fino
 que chama `process_index_job_attempt` e traduz o resultado em
-reagendar (ou não) via Celery.
+reagendar (ou não) via Celery — e, desde RAG-053, também em métrica de
+consumo (`packages.observability.metrics.record_index_job_attempt`),
+usando o valor de retorno de `IndexJobAttemptOutcome` para saber se a
+tentativa teve sucesso ou falhou definitivamente (o único caso em que
+a task NÃO consegue distinguir os dois só pela ausência de exceção).
 """
 
 from __future__ import annotations
 
+from enum import Enum
 from uuid import UUID
 
 from packages.application.ports.document_processor import DocumentProcessorPort
@@ -32,6 +37,18 @@ class RetryableIndexJobError(Exception):
     `error_message` antes desta ser levantada."""
 
 
+class IndexJobAttemptOutcome(Enum):
+    """Desfecho de uma tentativa que de fato rodou (ver
+    `process_index_job_attempt`) — o terceiro desfecho possível, "job
+    já reivindicado por outro worker ou inexistente", não entra aqui:
+    nesse caso a função devolve `None`, porque nenhuma tentativa real
+    aconteceu (RAG-053, `packages.observability.metrics`, não registra
+    métrica nenhuma para esse caso)."""
+
+    SUCCEEDED = "succeeded"
+    FAILED_FINAL = "failed_final"
+
+
 async def process_index_job_attempt(
     document_repository: DocumentRepositoryPort,
     document_processor: DocumentProcessorPort,
@@ -39,7 +56,7 @@ async def process_index_job_attempt(
     index_job_id: UUID,
     attempt_number: int,
     max_attempts: int,
-) -> None:
+) -> IndexJobAttemptOutcome | None:
     """Executa uma tentativa de processar `index_job_id`.
 
     `attempt_number` é 1-based (a primeira tentativa é 1) — só nela se
@@ -53,12 +70,16 @@ async def process_index_job_attempt(
     o único caso em que quem chama deve reagendar. Nos outros três
     casos (sucesso, falha definitiva, job já reivindicado por outro
     worker ou inexistente) a função retorna normalmente; o estado
-    final já foi persistido em `IndexJob` antes de retornar.
+    final já foi persistido em `IndexJob` antes de retornar. Devolve
+    `IndexJobAttemptOutcome.SUCCEEDED`/`FAILED_FINAL` nos dois
+    primeiros casos, e `None` no terceiro (nenhuma tentativa real
+    aconteceu) — RAG-053 usa esse valor para métricas de consumo, sem
+    precisar que quem chama inspecione `IndexJob` de novo.
     """
     if attempt_number == 1:
         claimed = await document_repository.claim_index_job(index_job_id=index_job_id)
         if claimed is None:
-            return
+            return None
 
     try:
         await document_processor.process(index_job_id=index_job_id)
@@ -72,7 +93,8 @@ async def process_index_job_attempt(
             final=is_final,
         )
         if is_final:
-            return
+            return IndexJobAttemptOutcome.FAILED_FINAL
         raise RetryableIndexJobError from exc
     else:
         await document_repository.mark_index_job_succeeded(index_job_id=index_job_id)
+        return IndexJobAttemptOutcome.SUCCEEDED

@@ -31,6 +31,7 @@ from packages.contracts.knowledge_base import (
     KnowledgeBaseUpdateRequest,
 )
 from packages.domain.entities.knowledge_base import KnowledgeBase
+from packages.observability.metrics import record_knowledge_base_mutation
 
 router = APIRouter(prefix="/v1/knowledge-bases", tags=["knowledge-bases"])
 
@@ -80,6 +81,7 @@ async def create_knowledge_base(
         resource_type="knowledge_base",
         resource_id=knowledge_base.id,
     )
+    record_knowledge_base_mutation(action="create")
     return _to_response(knowledge_base)
 
 
@@ -131,6 +133,7 @@ async def update_knowledge_base(
         resource_type="knowledge_base",
         resource_id=knowledge_base_id,
     )
+    record_knowledge_base_mutation(action="update")
     return _to_response(knowledge_base)
 
 
@@ -153,4 +156,5 @@ async def delete_knowledge_base(
         resource_type="knowledge_base",
         resource_id=knowledge_base_id,
     )
+    record_knowledge_base_mutation(action="delete")
     return Response(status_code=status.HTTP_204_NO_CONTENT)

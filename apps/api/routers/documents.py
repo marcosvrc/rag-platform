@@ -40,6 +40,10 @@ from packages.application.ports.object_storage import ObjectStoragePort
 from packages.application.ports.token_verifier import TokenClaims
 from packages.config.settings import Settings
 from packages.contracts.document import DocumentUploadResponse, ReindexResponse
+from packages.observability.metrics import (
+    record_document_reindexed,
+    record_document_uploaded,
+)
 
 router = APIRouter(prefix="/v1/knowledge-bases", tags=["documents"])
 
@@ -137,6 +141,7 @@ async def upload_document(
         resource_type="document",
         resource_id=upload.document.id,
     )
+    record_document_uploaded(mime_type=upload.document.mime_type)
     return _to_response(upload)
 
 
@@ -171,6 +176,7 @@ async def reindex_document(
         resource_type="document",
         resource_id=document_id,
     )
+    record_document_reindexed()
     return _to_reindex_response(
         result, document_id=document_id, knowledge_base_id=knowledge_base_id
     )

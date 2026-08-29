@@ -1,0 +1,103 @@
+{
+  "__inputs": [],
+  "__requires": [],
+  "id": null,
+  "uid": "rag-platform-overview",
+  "title": "rag-platform — visão geral (RAG-053)",
+  "description": "Dashboard básico das métricas técnicas e de consumo instrumentadas via OpenTelemetry (RAG-052/RAG-053). Nomes exatos de métrica no Prometheus dependem da conversão feita pelo exporter do OTel Collector (pontos viram underscores, contadores ganham sufixo _total, histogramas viram _bucket/_sum/_count) — confirme contra `curl localhost:8889/metrics` na primeira subida real (`docker compose up`) antes de usar em produção; nenhum teste de pull request sobe um Collector real (seção 1 do plano).",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "browser",
+  "time": { "from": "now-1h", "to": "now" },
+  "refresh": "30s",
+  "tags": ["rag-platform", "rag-053"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Requisições HTTP por rota (RAG-052, FastAPIInstrumentor)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (http_route, http_status_code) (rate(http_server_duration_milliseconds_count[5m]))",
+          "legendFormat": "{{http_route}} ({{http_status_code}})"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Documentos enviados, por tipo MIME",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (mime_type) (rate(rag_platform_documents_uploaded_total[5m]))",
+          "legendFormat": "{{mime_type}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Mutações de base de conhecimento, por ação",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (action) (rate(rag_platform_knowledge_bases_mutations_total[5m]))",
+          "legendFormat": "{{action}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Tentativas de indexação, por desfecho",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(rag_platform_index_jobs_attempts_total[5m]))",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Duração das tentativas de indexação (p50/p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(rag_platform_index_jobs_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(rag_platform_index_jobs_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Chamadas ao gateway de embeddings — textos e duração (p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "rate(rag_platform_embeddings_texts_total[5m])",
+          "legendFormat": "textos/s"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(rag_platform_embeddings_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "duração p95 (s)"
+        }
+      ]
+    }
+  ]
+}
