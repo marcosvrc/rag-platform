@@ -111,6 +111,19 @@ def test_computed_urls_use_the_real_secret_value(
     )
     assert settings.redis_url == "redis://localhost:6379/0"
     assert settings.minio_endpoint == "localhost:9000"
+    assert settings.minio_endpoint_url == "http://localhost:9000"
+
+
+def test_minio_endpoint_url_uses_https_when_ssl_is_enabled(
+    clean_env: pytest.MonkeyPatch,
+) -> None:
+    clean_env.setenv("POSTGRES_PASSWORD", "s3cr3t-should-not-leak")
+    clean_env.setenv("MINIO_ROOT_PASSWORD", "another-secret-should-not-leak")
+    clean_env.setenv("MINIO_USE_SSL", "true")
+
+    settings = load_settings(env_file=None)
+
+    assert settings.minio_endpoint_url == "https://localhost:9000"
 
 
 def test_get_settings_is_cached_per_process(
