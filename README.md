@@ -19,6 +19,8 @@ Concluído até o momento:
 - **RAG-004 — Implementar configuração da aplicação** (Pydantic Settings).
 - **RAG-006 — Configurar banco e migrations** (SQLAlchemy async + Alembic
   + extensão pgvector).
+- **RAG-005 — Criar API base e health checks** (FastAPI, `/health/live`,
+  `/health/ready`).
 
 ## Desenvolvimento local
 
@@ -29,6 +31,7 @@ make install    # cria .venv e instala dependências de desenvolvimento
 make lint       # ruff check + ruff format --check
 make typecheck  # mypy sobre apps/, packages/, adapters/ e tests/
 make test       # pytest com relatório de cobertura (term-missing + XML)
+make run-api    # sobe a API (uvicorn, com reload) em http://localhost:8000
 make check      # lint + typecheck + test — o "pipeline" local completo
 ```
 
@@ -81,6 +84,25 @@ expõe `get_engine()`/`get_session_factory()`/`get_session()`
 
 Para gerar o SQL das migrations sem se conectar a um banco (útil para
 revisão em PR): `.venv/bin/alembic upgrade head --sql`.
+## API (RAG-005)
+
+Com os serviços do `docker compose` (RAG-003) no ar e um `.env` válido
+(RAG-004), suba a API com `make run-api` e teste:
+
+```bash
+curl http://localhost:8000/health/live
+# {"status": "ok"}
+
+curl -i http://localhost:8000/health/ready
+# 200 se Postgres, Redis e MinIO estiverem alcançáveis; 503 caso contrário,
+# com o detalhe de qual dependência falhou (nunca stack trace ou credencial):
+# {"status": "error", "checks": {"postgres": "ok", "redis": "error", "minio": "ok"}}
+```
+
+`/health/live` nunca depende de Postgres/Redis/MinIO — verifica só que o
+processo está no ar, para não ser derrubado por uma falha temporária de
+uma dependência (isso é papel do `/health/ready`). Endpoints de negócio
+(`/v1/...`) chegam a partir de RAG-012.
 
 ## Serviços locais (RAG-003)
 
