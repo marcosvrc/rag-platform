@@ -629,3 +629,66 @@ Testes: `tests/unit/test_prompts.py` cobre carregamento do `answer.v1`
 real, os três requisitos de aceite acima, erro (`PromptNotFoundError`)
 para id/versão inexistente, erro de inconsistência id/versão-vs-nome-de-arquivo,
 cache por `(id, version)` e imutabilidade.
+
+## Extração de conteúdo (RAG-023)
+
+Implementa o passo 8 do fluxo de indexação (seção 11 do plano):
+extrair texto e metadados de um documento já em memória (baixado do
+object storage por quem chama — esta atividade não decide isso,
+fica para o pipeline orquestrador do RAG-024/RAG-027 usar). Normalização,
+chunking, embeddings e persistência (passos 9-14) continuam sem
+implementação — RAG-024 a RAG-027.
+
+`packages/application/ports/document_parser.py` define
+`DocumentParserPort` (`parse(filename, content, content_type) ->
+ParsedDocument`) — o domínio e os casos de uso não importam Docling
+diretamente, só esta porta. `ParsedDocument` carrega o texto extraído
+já normalizado para Markdown, a contagem de páginas (`None` quando o
+formato não pagina, como Markdown/texto puro/DOCX) e o mimetype
+original. Erros são categorizados em duas classes, ambas com
+`content_type`/`detail` seguros para o chamador expor:
+`UnsupportedDocumentFormatError` (formato que este parser não processa
+— nunca, ou ainda não) e `DocumentParsingError` (formato suportado, mas
+o conteúdo em si não pôde ser extraído — corrompido, malformado etc.).
+
+`adapters/docling/parser.py` (`DoclingDocumentParser`) é a única
+implementação hoje, para os quatro tipos aceitos no upload (RAG-021):
+Markdown e texto puro (Docling trata texto puro como markdown trivial)
+e DOCX extraem com sucesso; **PDF levanta `UnsupportedDocumentFormatError`
+por enquanto** — não é uma decisão definitiva de excluir PDF, é uma
+limitação temporária explicada em detalhe na docstring do módulo:
+
+- O pipeline padrão de PDF do Docling baixa pesos de modelo em runtime
+  — um modelo de detecção de **layout** do Hugging Face Hub sempre, e
+  um modelo de **OCR** (RapidOCR) do ModelScope quando `do_ocr=True`.
+  Isso foi testado nesta atividade: desabilitar OCR evita só o segundo
+  download, não o primeiro — o modelo de layout não é OCR, é a
+  extração de estrutura em si (o plano, seção 4.2, só exclui "OCR
+  avançado" do escopo do POC).
+- Nem o ambiente de dev local nem o ambiente onde isso foi pesquisado
+  têm egress liberado para `huggingface.co`/`modelscope.cn` hoje.
+- Por isso a dependência instalada é só
+  `docling-slim[convert-core,format-markdown,format-docx,format-pdf]`
+  (~450MB) em vez do extra `standard`/`all` (~5,5GB, que traz
+  `torch`/`transformers`/`docling-ibm-models` para os modelos de ML). O
+  extra `format-pdf` é necessário mesmo sem processar PDF porque
+  `docling.document_converter` importa o backend de PDF
+  incondicionalmente no nível de módulo — mas o `DocumentConverter`
+  deste adapter nunca registra `InputFormat.PDF`, então nenhum modelo é
+  carregado nem baixado.
+- **Caminho para habilitar PDF depois** (não é trabalho desta
+  atividade): pré-baixar os pesos uma vez com egress liberado
+  (`docling-tools models download`), apontar
+  `PdfPipelineOptions(artifacts_path=..., do_ocr=False)` para esse
+  diretório (elimina o download em runtime), adicionar o extra
+  `models-local` à dependência e decidir onde os pesos pré-baixados
+  vivem em cada ambiente — essa última parte é uma decisão de deploy
+  (RAG-07x), não de código.
+
+Testes: `tests/unit/test_docling_parser.py` cobre os quatro formatos
+do RAG-021 (Markdown, texto puro e DOCX extraindo com sucesso; PDF
+levantando `UnsupportedDocumentFormatError`, sem tentar decodificar o
+conteúdo), um `content_type` desconhecido e um DOCX corrompido
+(`DocumentParsingError`, não `UnsupportedDocumentFormatError` —
+distinção que o critério de aceite "erro de parsing é categorizado"
+exige).
