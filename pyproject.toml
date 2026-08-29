@@ -32,6 +32,12 @@ dependencies = [
     # RAG-040 — carregamento de prompts versionados (config/prompts/*.yaml)
     # em runtime, não só em ferramentas de dev/CI.
     "pyyaml>=6.0,<7.0",
+    # RAG-023 — extração de conteúdo via Docling, restrita aos extras
+    # leves (sem os modelos de ML de layout/OCR do pipeline de PDF, que
+    # dependem de download em runtime do Hugging Face Hub/ModelScope —
+    # ver README, seção RAG-023, para o motivo de PDF ficar de fora por
+    # enquanto). Cobre MD, TXT (tratado como markdown trivial) e DOCX.
+    "docling-slim[convert-core,format-markdown,format-docx,format-pdf]>=2.123.1,<3",
 ]
 
 [project.optional-dependencies]
