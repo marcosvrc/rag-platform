@@ -29,6 +29,9 @@ Concluído até o momento:
   índices do modelo mínimo, migration 0002).
 - **RAG-013 — Tratamento padronizado de erros** (Problem Details,
   RFC 7807, com `request_id` de correlação).
+- **RAG-012 — Implementar CRUD de bases de conhecimento** (criar,
+  listar, consultar, atualizar e excluir logicamente; paginação por
+  cursor; isolamento por tenant).
 
 ## Desenvolvimento local
 
@@ -144,6 +147,57 @@ curl -i http://localhost:8000/qualquer-rota-que-nao-existe
 - `/health/live` e `/health/ready` (RAG-005) mantêm o próprio formato
   (`{"status": ..., "checks": {...}}`) — são um contrato à parte, não
   endpoints de negócio.
+
+## Bases de conhecimento (RAG-012)
+
+Endpoints de `/v1/knowledge-bases` (seção 10.1 do plano):
+
+| Método | Rota | O que faz |
+| --- | --- | --- |
+| `POST` | `/v1/knowledge-bases` | cria (201) |
+| `GET` | `/v1/knowledge-bases` | lista, paginado por cursor (200) |
+| `GET` | `/v1/knowledge-bases/{id}` | consulta (200) |
+| `PATCH` | `/v1/knowledge-bases/{id}` | atualização parcial (200) |
+| `DELETE` | `/v1/knowledge-bases/{id}` | exclusão lógica (204) |
+
+Decisões e limitações:
+
+- **Isolamento por tenant, provisório até o RAG-050.** Não há
+  autenticação JWT ainda (chega no RAG-050); `tenant_id` é resolvido a
+  partir do cabeçalho `X-Tenant-Id` (`apps/api/dependencies.py::get_current_tenant_id`),
+  ausente ou inválido vira 401. Essa é uma decisão explícita e
+  temporária — quando o RAG-050 chegar, só o corpo dessa função muda
+  (resolve o tenant a partir de um token validado); a assinatura usada
+  pelos routers (`Depends(get_current_tenant_id)`) e toda a
+  arquitetura de isolamento abaixo continuam iguais.
+- **Toda consulta ao banco recebe `tenant_id` explicitamente**
+  (`packages/application/ports/knowledge_base_repository.py`). Uma
+  base de outro tenant é tratada exatamente como inexistente — 404,
+  nunca 403 — para não vazar a existência de recursos alheios.
+- **Arquitetura em portas e adaptadores**: `KnowledgeBaseRepositoryPort`
+  (`packages/application/ports/`) tem dois adapters —
+  `InMemoryKnowledgeBaseRepository` (usado nos testes) e
+  `PostgresKnowledgeBaseRepository` (usado pela API) — mesmo padrão do
+  object storage (RAG-020). Comandos (escrita) e consultas (leitura)
+  ficam em `packages/application/commands|queries/knowledge_base.py` e
+  traduzem falhas do repositório para os erros de aplicação de RAG-013
+  (`NotFoundError`, `ConflictError`, `UnprocessableEntityError`).
+- **Paginação por cursor** (seção 8 do plano): o cursor é um par opaco
+  `(created_at, id)` codificado como string; `GET
+  /v1/knowledge-bases?limit=N&cursor=...` devolve até `N` itens e um
+  `next_cursor` (`null` na última página).
+- **`PATCH` é parcial de verdade**: só os campos enviados no corpo são
+  alterados (`exclude_unset`). `description` aceita `null` explícito
+  (limpa o campo); `name`/`config` enviados como `null` viram 422 —
+  o domínio não permite nome vazio nem config nula.
+- **`PostgresKnowledgeBaseRepository` não tem teste de integração
+  neste sandbox** (mesma limitação já documentada em
+  `adapters/postgres/engine.py`, RAG-006, e em `test_schema.py`,
+  RAG-011: nenhum teste de PR chama infraestrutura real). O contrato
+  da porta — incluindo os critérios de aceite desta atividade
+  (paginação, isolamento por tenant) — é validado via
+  `InMemoryKnowledgeBaseRepository`, que segue exatamente as mesmas
+  regras.
 
 ## CI (RAG-070)
 
