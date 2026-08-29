@@ -166,14 +166,13 @@ Endpoints de `/v1/knowledge-bases` (seção 10.1 do plano):
 
 Decisões e limitações:
 
-- **Isolamento por tenant, provisório até o RAG-050.** Não há
-  autenticação JWT ainda (chega no RAG-050); `tenant_id` é resolvido a
-  partir do cabeçalho `X-Tenant-Id` (`apps/api/dependencies.py::get_current_tenant_id`),
-  ausente ou inválido vira 401. Essa é uma decisão explícita e
-  temporária — quando o RAG-050 chegar, só o corpo dessa função muda
-  (resolve o tenant a partir de um token validado); a assinatura usada
-  pelos routers (`Depends(get_current_tenant_id)`) e toda a
-  arquitetura de isolamento abaixo continuam iguais.
+- **Isolamento por tenant via JWT autenticado (RAG-050/RAG-051).**
+  `tenant_id` é resolvido a partir de um `Authorization: Bearer <token>`
+  verificado (`apps/api/dependencies.py::get_current_tenant_id` →
+  `get_current_identity` → `TokenVerifierPort`, RAG-050); token ausente,
+  malformado, inválido, ou sem a claim `tenant_id`, vira 401. O
+  cabeçalho `X-Tenant-Id` provisório do RAG-012 não existe mais — ver
+  "Autorização e contexto do tenant (RAG-051)" abaixo.
 - **Toda consulta ao banco recebe `tenant_id` explicitamente**
   (`packages/application/ports/knowledge_base_repository.py`). Uma
   base de outro tenant é tratada exatamente como inexistente — 404,
@@ -494,17 +493,50 @@ development ou production — lá, use um algoritmo assimétrico
 (`JWT_ALGORITHM=RS256` + `JWT_PUBLIC_KEY` da chave pública do IdP real)
 com o segredo gerenciado por secret manager.
 
-Esta atividade só entrega a verificação do token (assinatura, issuer,
+Esta atividade entrega a verificação do token (assinatura, issuer,
 audience, expiração — critério de aceite desta atividade). A troca de
-`apps/api/dependencies.py::get_current_tenant_id` do cabeçalho
-`X-Tenant-Id` provisório (RAG-012) para resolver o tenant a partir de um
-token verificado, e a prova de ausência de vazamento entre tenants, são
-RAG-051.
+`get_current_tenant_id` para resolver o tenant a partir de um token
+verificado (em vez do cabeçalho `X-Tenant-Id` provisório do RAG-012), e
+a prova de ausência de vazamento entre tenants, são RAG-051 (próxima
+seção).
 
 Testes: `tests/unit/test_token_verifier.py` (assinatura errada, issuer/
 audience errados, expiração, leeway, claims obrigatórias ausentes,
 `tenant_id` malformado, confusão de algoritmo, erros de configuração) e
 `tests/unit/test_mint_local_dev_token.py`.
+## Autorização e contexto do tenant (RAG-051)
+
+`apps/api/dependencies.py` agora resolve identidade e tenant sempre a
+partir de um JWT autenticado, nunca de um cabeçalho não verificado:
+
+- `get_current_identity` exige `Authorization: Bearer <token>` e
+  delega a verificação a `TokenVerifierPort` (RAG-050) — cabeçalho
+  ausente, esquema diferente de `Bearer`, ou token que `verify()`
+  rejeite, viram 401.
+- `get_current_tenant_id` depende de `get_current_identity` e exige que
+  a claim `tenant_id` esteja presente — a porta permite `tenant_id:
+  None` (nem todo token de acesso precisa identificar um tenant), mas
+  todo endpoint de negócio desta API opera em nome de exatamente um
+  tenant, então esta função torna a claim obrigatória. Um token válido
+  sem `tenant_id` também vira 401 (não é uma questão de permissão — o
+  token não carrega a informação mínima exigida).
+
+A assinatura usada pelos routers (`Depends(get_current_tenant_id)`) não
+mudou — só a implementação por trás dela, exatamente como planejado no
+RAG-050. `packages/application/ports/knowledge_base_repository.py` e
+`document_repository.py` já exigiam `tenant_id` explicitamente em todo
+método desde o RAG-012/RAG-021; esta atividade não precisou alterá-los.
+
+O cabeçalho `X-Tenant-Id` provisório do RAG-012 foi removido — chamadas
+à API agora exigem um JWT válido (ver "Autenticação JWT (RAG-050)"
+acima para como mintar um token local com `scripts/mint_local_dev_token.py`).
+
+Testes: `tests/unit/test_dependencies.py` (unidade — cabeçalho ausente,
+esquema inválido, token inválido, token sem `tenant_id`, resolução
+correta da identidade/tenant) e as suítes de isolamento entre tenants
+em `tests/unit/test_knowledge_base_router.py` e
+`tests/unit/test_document_router.py`, migradas de `X-Tenant-Id` para
+tokens JWT reais.
 ## Prompt de resposta (RAG-040)
 
 `config/prompts/answer.v1.yaml` é o prompt de resposta fundamentada,

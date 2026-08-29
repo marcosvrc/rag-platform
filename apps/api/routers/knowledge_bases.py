@@ -1,11 +1,12 @@
 """Endpoints de bases de conhecimento (RAG-012, seção 10.1 do plano).
 
 Isolamento por tenant: `tenant_id` vem de `get_current_tenant_id`
-(cabeçalho `X-Tenant-Id`, provisório até o RAG-050 trazer JWT) e é
-repassado explicitamente a toda chamada de repositório — nunca lido do
-corpo da requisição, então um tenant nunca pode operar sobre uma base
-de outro só porque o forjou no payload. Um recurso de outro tenant
-retorna 404, nunca 403 (ver `KnowledgeBaseRepositoryPort`).
+(resolvido a partir de um JWT autenticado — `Authorization: Bearer
+<token>`, RAG-050/RAG-051) e é repassado explicitamente a toda chamada
+de repositório — nunca lido do corpo da requisição, então um tenant
+nunca pode operar sobre uma base de outro só porque o forjou no
+payload. Um recurso de outro tenant retorna 404, nunca 403 (ver
+`KnowledgeBaseRepositoryPort`).
 """
 
 from __future__ import annotations

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import Header
+from fastapi import Depends, Header
 
+from adapters.token_verifier.pyjwt_verifier import PyJWTTokenVerifier
 from packages.application.errors import AuthenticationError
+from packages.application.ports.token_verifier import TokenClaims, TokenVerifierPort
 from packages.config.settings import Settings, get_settings
 
-TENANT_ID_HEADER = "X-Tenant-Id"
+_BEARER_PREFIX = "Bearer "
 
 
 def get_settings_dependency() -> Settings:
@@ -22,25 +24,60 @@ def get_settings_dependency() -> Settings:
     return get_settings()
 
 
-async def get_current_tenant_id(
-    x_tenant_id: str | None = Header(default=None, alias=TENANT_ID_HEADER),
-) -> UUID:
-    """Resolve o tenant da requisição atual (RAG-012).
+def get_token_verifier(
+    settings: Settings = Depends(get_settings_dependency),
+) -> TokenVerifierPort:
+    """Fábrica do verificador de token usado por `get_current_identity`
+    (RAG-050/RAG-051).
 
-    **Provisório**: lê o cabeçalho `X-Tenant-Id` diretamente, sem validar
-    sessão nem token algum — aceitável só em desenvolvimento local. A
-    autenticação JWT real (RAG-050) substitui o corpo desta função por
-    uma que resolve o tenant a partir de um token assinado e validado
-    (issuer/audience/expiração), sem mudar a assinatura usada pelos
-    routers (`Depends(get_current_tenant_id)` continua igual).
+    Depende de `Settings` via `Depends(get_settings_dependency)` — nunca
+    de `get_settings()` direto — pelo mesmo motivo de
+    `apps.api.routers.documents.get_object_storage`: assim os testes
+    conseguem trocar a configuração (issuer/audience/segredo) via
+    `app.dependency_overrides[get_settings_dependency]`, sem precisar de
+    variáveis de ambiente reais.
     """
-    if not x_tenant_id:
-        raise AuthenticationError(
-            detail=f"Cabeçalho '{TENANT_ID_HEADER}' é obrigatório (RAG-050 trará JWT real)."
-        )
-    try:
-        return UUID(x_tenant_id)
-    except ValueError as exc:
-        raise AuthenticationError(
-            detail=f"Cabeçalho '{TENANT_ID_HEADER}' inválido: não é um UUID."
-        ) from exc
+    return PyJWTTokenVerifier(settings)
+
+
+async def get_current_identity(
+    authorization: str | None = Header(default=None),
+    token_verifier: TokenVerifierPort = Depends(get_token_verifier),
+) -> TokenClaims:
+    """Resolve a identidade autenticada da requisição atual (RAG-051).
+
+    Exige um cabeçalho `Authorization: Bearer <token>` válido — sem
+    nenhum mecanismo alternativo (o cabeçalho provisório `X-Tenant-Id`
+    do RAG-012, que não autenticava nada, não existe mais). O token é
+    verificado via `TokenVerifierPort` (RAG-050: assinatura, issuer,
+    audience e expiração); qualquer falha — cabeçalho ausente, esquema
+    diferente de `Bearer`, ou token que `verify()` rejeite — vira 401
+    (`AuthenticationError`, RAG-013), nunca uma exceção interna vazando
+    para o cliente.
+    """
+    if authorization is None or not authorization.startswith(_BEARER_PREFIX):
+        raise AuthenticationError(detail="Cabeçalho 'Authorization: Bearer <token>' é obrigatório.")
+    token = authorization[len(_BEARER_PREFIX) :]
+    if not token:
+        raise AuthenticationError(detail="Cabeçalho 'Authorization: Bearer <token>' é obrigatório.")
+    return token_verifier.verify(token)
+
+
+async def get_current_tenant_id(
+    identity: TokenClaims = Depends(get_current_identity),
+) -> UUID:
+    """Resolve o tenant da requisição atual, a partir da identidade já
+    autenticada (RAG-012/RAG-051).
+
+    `TokenClaims.tenant_id` é opcional na porta (nem todo token de
+    acesso precisa identificar um tenant — ver
+    `packages/application/ports/token_verifier.py`); é esta função que
+    torna a claim obrigatória, porque todo endpoint de negócio desta API
+    opera em nome de exatamente um tenant. Um token válido mas sem
+    `tenant_id` é rejeitado com 401, não com 403: não é uma questão de
+    permissão, é o token não carregar a informação mínima que qualquer
+    endpoint de negócio exige.
+    """
+    if identity.tenant_id is None:
+        raise AuthenticationError(detail="Token válido, mas sem a claim 'tenant_id' obrigatória.")
+    return identity.tenant_id

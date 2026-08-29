@@ -2,9 +2,12 @@
 
 Usa o app real (`apps.api.main.app`), com o repositório trocado por
 `InMemoryKnowledgeBaseRepository` via `dependency_overrides` — mesmo
-padrão de `test_health.py` (RAG-005). `X-Tenant-Id` é enviado como
-cabeçalho real em cada requisição (não é sobrescrito via Depends),
-para também exercitar `get_current_tenant_id` (RAG-012) fim a fim.
+padrão de `test_health.py` (RAG-005). `_headers()` minta um JWT real
+(RAG-050) e o envia como `Authorization: Bearer <token>` em cada
+requisição (não é sobrescrito via Depends), para também exercitar
+`get_current_tenant_id`/`get_current_identity` (RAG-012/RAG-051) fim a
+fim — o cabeçalho `X-Tenant-Id` não verificado do RAG-012 não existe
+mais.
 
 Cobre os critérios de aceite da atividade: endpoints seguem o
 contrato HTTP da seção 10.1 do plano; paginação por cursor funciona;
@@ -13,18 +16,54 @@ base do tenant B.
 """
 
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+import jwt
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 from adapters.knowledge_base_repository.in_memory import InMemoryKnowledgeBaseRepository
 from apps.api import main
+from apps.api.dependencies import get_settings_dependency
 from apps.api.errors import PROBLEM_JSON_MEDIA_TYPE
 from apps.api.routers.knowledge_bases import get_knowledge_base_repository
+from packages.config.settings import Settings
 
 TENANT_A = str(uuid4())
 TENANT_B = str(uuid4())
+
+_JWT_SECRET = "test-jwt-secret-knowledge-base-router-do-not-use-elsewhere"
+_JWT_ISSUER = "rag-platform-tests"
+_JWT_AUDIENCE = "rag-platform-tests-api"
+
+
+def _test_settings(**overrides: object) -> Settings:
+    fields: dict[str, object] = {
+        "_env_file": None,
+        "POSTGRES_PASSWORD": SecretStr("x"),
+        "MINIO_ROOT_PASSWORD": SecretStr("x"),
+        "JWT_SECRET": SecretStr(_JWT_SECRET),
+        "JWT_ISSUER": _JWT_ISSUER,
+        "JWT_AUDIENCE": _JWT_AUDIENCE,
+    }
+    fields.update(overrides)
+    return Settings(**fields)  # type: ignore[arg-type]
+
+
+def _make_token(*, tenant_id: str | None = TENANT_A, subject: str = "test-user") -> str:
+    now = datetime.now(tz=UTC)
+    payload: dict[str, object] = {
+        "sub": subject,
+        "iss": _JWT_ISSUER,
+        "aud": _JWT_AUDIENCE,
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=5)).timestamp()),
+    }
+    if tenant_id is not None:
+        payload["tenant_id"] = tenant_id
+    return jwt.encode(payload, key=_JWT_SECRET, algorithm="HS256")
 
 
 @pytest.fixture
@@ -35,6 +74,7 @@ def repository() -> InMemoryKnowledgeBaseRepository:
 @pytest.fixture
 def client(repository: InMemoryKnowledgeBaseRepository) -> Iterator[TestClient]:
     main.app.dependency_overrides[get_knowledge_base_repository] = lambda: repository
+    main.app.dependency_overrides[get_settings_dependency] = lambda: _test_settings()
     try:
         yield TestClient(main.app)
     finally:
@@ -42,7 +82,7 @@ def client(repository: InMemoryKnowledgeBaseRepository) -> Iterator[TestClient]:
 
 
 def _headers(tenant_id: str = TENANT_A) -> dict[str, str]:
-    return {"X-Tenant-Id": tenant_id}
+    return {"Authorization": f"Bearer {_make_token(tenant_id=tenant_id)}"}
 
 
 def test_create_returns_201_with_the_created_knowledge_base(client: TestClient) -> None:
@@ -59,16 +99,38 @@ def test_create_returns_201_with_the_created_knowledge_base(client: TestClient) 
     assert body["tenant_id"] == TENANT_A
 
 
-def test_create_requires_tenant_header(client: TestClient) -> None:
+def test_create_requires_authorization_header(client: TestClient) -> None:
     response = client.post("/v1/knowledge-bases", json={"name": "Manuais"})
 
     assert response.status_code == 401
     assert response.headers["content-type"] == PROBLEM_JSON_MEDIA_TYPE
 
 
-def test_create_rejects_malformed_tenant_header(client: TestClient) -> None:
+def test_create_rejects_non_bearer_authorization_header(client: TestClient) -> None:
     response = client.post(
-        "/v1/knowledge-bases", json={"name": "Manuais"}, headers={"X-Tenant-Id": "not-a-uuid"}
+        "/v1/knowledge-bases",
+        json={"name": "Manuais"},
+        headers={"Authorization": "Basic dXNlcjpwYXNz"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_create_rejects_invalid_token(client: TestClient) -> None:
+    response = client.post(
+        "/v1/knowledge-bases",
+        json={"name": "Manuais"},
+        headers={"Authorization": "Bearer not-a-valid-jwt"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_create_rejects_token_without_tenant_id_claim(client: TestClient) -> None:
+    response = client.post(
+        "/v1/knowledge-bases",
+        json={"name": "Manuais"},
+        headers={"Authorization": f"Bearer {_make_token(tenant_id=None)}"},
     )
 
     assert response.status_code == 401
