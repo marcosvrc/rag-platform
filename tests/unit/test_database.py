@@ -35,6 +35,8 @@ def _clear_engine_caches() -> None:
 def configured_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("POSTGRES_PASSWORD", "s3cr3t-should-not-leak")
     monkeypatch.setenv("MINIO_ROOT_PASSWORD", "another-secret-should-not-leak")
+    monkeypatch.setenv("JWT_ISSUER", "rag-platform-tests")
+    monkeypatch.setenv("JWT_AUDIENCE", "rag-platform-tests-api")
 
 
 def test_base_metadata_registers_all_core_tables(configured_env: None) -> None:

@@ -30,6 +30,8 @@ def _make_settings() -> Settings:
         POSTGRES_PASSWORD=SecretStr("x"),
         MINIO_ROOT_PASSWORD=SecretStr("x"),
         MINIO_BUCKET="test-bucket",
+        JWT_ISSUER="rag-platform-tests",
+        JWT_AUDIENCE="rag-platform-tests-api",
     )
 
 

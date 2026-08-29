@@ -29,6 +29,8 @@ def fake_settings() -> Settings:
         _env_file=None,  # type: ignore[call-arg]
         POSTGRES_PASSWORD=SecretStr(FAKE_POSTGRES_PASSWORD),
         MINIO_ROOT_PASSWORD=SecretStr(FAKE_MINIO_PASSWORD),
+        JWT_ISSUER="rag-platform-tests",
+        JWT_AUDIENCE="rag-platform-tests-api",
     )
 
 
@@ -121,6 +123,8 @@ def test_get_settings_dependency_returns_the_cached_settings(
 ) -> None:
     monkeypatch.setenv("POSTGRES_PASSWORD", "fake-postgres-password")
     monkeypatch.setenv("MINIO_ROOT_PASSWORD", "fake-minio-password")
+    monkeypatch.setenv("JWT_ISSUER", "rag-platform-tests")
+    monkeypatch.setenv("JWT_AUDIENCE", "rag-platform-tests-api")
     get_settings.cache_clear()
     try:
         assert get_settings_dependency() is get_settings()

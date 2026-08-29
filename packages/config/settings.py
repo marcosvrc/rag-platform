@@ -67,6 +67,25 @@ class Settings(BaseSettings):
     minio_use_ssl: bool = Field(default=False, alias="MINIO_USE_SSL")
     minio_bucket: str = Field(default="rag-platform", alias="MINIO_BUCKET")
 
+    # Autenticação JWT (RAG-050). `jwt_issuer`/`jwt_audience` são
+    # obrigatórios (sem default) mesmo em modo local: forçam configuração
+    # explícita via `.env`, em vez de um valor "que sempre funciona" que
+    # poderia vazar para produção sem ninguém notar. Em modo local, isso
+    # é um provedor de identidade *simulado* — só um segredo compartilhado
+    # (`JWT_SECRET`, algoritmo HS*) configurado localmente, sem OIDC real
+    # nem rotação de chave (seção 13 do plano: "em modo local, provedor
+    # de identidade simulado e explicitamente identificado como não
+    # produtivo"). `jwt_public_key` só é usado com um algoritmo
+    # assimétrico (RS*/ES*/PS*); os dois nunca são obrigatórios ao mesmo
+    # tempo, e qual deles vale depende de `jwt_algorithm` (validado em
+    # `adapters/token_verifier/pyjwt_verifier.py`, não aqui).
+    jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
+    jwt_secret: SecretStr | None = Field(default=None, alias="JWT_SECRET")
+    jwt_public_key: str | None = Field(default=None, alias="JWT_PUBLIC_KEY")
+    jwt_issuer: str = Field(alias="JWT_ISSUER")
+    jwt_audience: str = Field(alias="JWT_AUDIENCE")
+    jwt_leeway_seconds: int = Field(default=10, alias="JWT_LEEWAY_SECONDS")
+
     @property
     def database_url(self) -> str:
         """DSN assíncrono do SQLAlchemy (driver `asyncpg`, ver RAG-006)."""
