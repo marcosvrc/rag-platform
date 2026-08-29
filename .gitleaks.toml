@@ -1,20 +1,22 @@
 # rag-platform — configuração do gitleaks (RAG-071)
 #
-# Usa o conjunto padrão de regras do gitleaks e mantém uma allowlist
-# própria para falsos positivos documentados. Toda entrada adicionada
-# abaixo precisa ter uma exceção correspondente em
-# security/exceptions.yml (chave `gitleaks`), com justificativa e
-# prazo — o job `security-exceptions` do CI garante isso.
+# Usa só o conjunto padrão de regras do gitleaks por enquanto — nenhuma
+# exceção foi necessária ainda. Se um falso positivo aparecer, adicione
+# um bloco `[[allowlists]]` aqui (gitleaks exige pelo menos um de
+# `paths`/`regexes`/`commits`/`stopwords` — um bloco vazio faz o
+# gitleaks recusar o arquivo inteiro, não apenas ignorar a entrada) e
+# registre a exceção correspondente em security/exceptions.yml (chave
+# `gitleaks`), com justificativa e prazo — o job `security-exceptions`
+# do CI garante isso.
+#
+# Exemplo (descomente e adapte quando houver uma exceção real):
+#
+# [[allowlists]]
+# description = "Falso positivo documentado em security/exceptions.yml"
+# paths = [
+#   '''caminho/do/arquivo\.py''',
+# ]
 title = "rag-platform"
 
 [extend]
 useDefault = true
-
-[allowlist]
-description = "Falsos positivos documentados (ver security/exceptions.yml)"
-# paths = [
-#   '''caminho/do/arquivo\.py''',
-# ]
-# regexes = [
-#   '''exemplo-de-padrao-liberado''',
-# ]
