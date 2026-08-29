@@ -1,11 +1,13 @@
-"""Testes de RAG-021: `packages.application.commands.document.upload_document`.
+"""Testes de RAG-021/RAG-022: `packages.application.commands.document.upload_document`.
 
 Cobre os critérios de aceite da atividade: 202 (implícito — o comando
 devolve o resultado que o router serializa com esse status), detecção
-de duplicidade, rejeição de tipo/tamanho inválido e suporte a
-idempotência. Usa os fakes em memória (`InMemoryDocumentRepository`,
-`InMemoryKnowledgeBaseRepository`, `InMemoryObjectStorage`) — mesmo
-padrão dos demais testes de comando neste projeto.
+de duplicidade, rejeição de tipo/tamanho inválido, suporte a
+idempotência, e (RAG-022) publicação do job na fila só quando algo novo
+foi de fato criado. Usa os fakes em memória (`InMemoryDocumentRepository`,
+`InMemoryKnowledgeBaseRepository`, `InMemoryObjectStorage`,
+`InMemoryJobQueue`) — mesmo padrão dos demais testes de comando neste
+projeto.
 
 Nenhuma fixture aqui é `async def`: a base de conhecimento usada em
 cada teste é criada por `_create_knowledge_base`, chamada explicitamente
@@ -23,6 +25,7 @@ import pytest
 from adapters.document_repository.in_memory import InMemoryDocumentRepository
 from adapters.knowledge_base_repository.in_memory import InMemoryKnowledgeBaseRepository
 from adapters.object_storage.in_memory import InMemoryObjectStorage
+from adapters.queue.in_memory import InMemoryJobQueue
 from packages.application.commands.document import upload_document
 from packages.application.errors import ConflictError, NotFoundError, UnprocessableEntityError
 from packages.application.ports.document_repository import (
@@ -50,6 +53,11 @@ def knowledge_base_repository() -> InMemoryKnowledgeBaseRepository:
     return InMemoryKnowledgeBaseRepository()
 
 
+@pytest.fixture
+def job_queue() -> InMemoryJobQueue:
+    return InMemoryJobQueue()
+
+
 async def _create_knowledge_base(repository: InMemoryKnowledgeBaseRepository) -> UUID:
     knowledge_base = await repository.create(
         tenant_id=TENANT_ID, name="Manuais", description=None, config={}
@@ -61,6 +69,7 @@ async def _upload(
     document_repository: InMemoryDocumentRepository,
     knowledge_base_repository: InMemoryKnowledgeBaseRepository,
     object_storage: InMemoryObjectStorage,
+    job_queue: InMemoryJobQueue,
     *,
     knowledge_base_id: UUID,
     filename: str = "guia.pdf",
@@ -73,6 +82,7 @@ async def _upload(
         document_repository,
         knowledge_base_repository,
         object_storage,
+        job_queue,
         tenant_id=TENANT_ID,
         knowledge_base_id=knowledge_base_id,
         filename=filename,
@@ -87,6 +97,7 @@ async def test_upload_creates_pending_document_with_v1_and_pending_job(
     document_repository: InMemoryDocumentRepository,
     knowledge_base_repository: InMemoryKnowledgeBaseRepository,
     object_storage: InMemoryObjectStorage,
+    job_queue: InMemoryJobQueue,
 ) -> None:
     knowledge_base_id = await _create_knowledge_base(knowledge_base_repository)
 
@@ -94,6 +105,7 @@ async def test_upload_creates_pending_document_with_v1_and_pending_job(
         document_repository,
         knowledge_base_repository,
         object_storage,
+        job_queue,
         knowledge_base_id=knowledge_base_id,
     )
 
@@ -103,18 +115,55 @@ async def test_upload_creates_pending_document_with_v1_and_pending_job(
     assert upload.replayed is False
     stored_bytes = await object_storage.download(key=upload.version.object_key)
     assert stored_bytes == b"%PDF-1.4 conteudo de teste"
+    # RAG-022: o job criado é publicado na fila.
+    assert job_queue.enqueued_index_job_ids == [upload.index_job.id]
+
+
+async def test_upload_replay_does_not_enqueue_the_job_again(
+    document_repository: InMemoryDocumentRepository,
+    knowledge_base_repository: InMemoryKnowledgeBaseRepository,
+    object_storage: InMemoryObjectStorage,
+    job_queue: InMemoryJobQueue,
+) -> None:
+    """Critério de aceite do RAG-022 ("job é consumido") pressupõe uma
+    única publicação por job — uma repetição idempotente (RAG-021) não
+    deve publicar o mesmo job de novo na fila."""
+    knowledge_base_id = await _create_knowledge_base(knowledge_base_repository)
+
+    first = await _upload(
+        document_repository,
+        knowledge_base_repository,
+        object_storage,
+        job_queue,
+        knowledge_base_id=knowledge_base_id,
+        idempotency_key="idem-enqueue",
+    )
+    second = await _upload(
+        document_repository,
+        knowledge_base_repository,
+        object_storage,
+        job_queue,
+        knowledge_base_id=knowledge_base_id,
+        idempotency_key="idem-enqueue",
+    )
+
+    assert first.replayed is False
+    assert second.replayed is True
+    assert job_queue.enqueued_index_job_ids == [first.index_job.id]
 
 
 async def test_upload_to_unknown_knowledge_base_raises_not_found(
     document_repository: InMemoryDocumentRepository,
     knowledge_base_repository: InMemoryKnowledgeBaseRepository,
     object_storage: InMemoryObjectStorage,
+    job_queue: InMemoryJobQueue,
 ) -> None:
     with pytest.raises(NotFoundError):
         await _upload(
             document_repository,
             knowledge_base_repository,
             object_storage,
+            job_queue,
             knowledge_base_id=uuid4(),
         )
 
@@ -135,6 +184,7 @@ async def test_upload_accepts_every_supported_format(
     document_repository: InMemoryDocumentRepository,
     knowledge_base_repository: InMemoryKnowledgeBaseRepository,
     object_storage: InMemoryObjectStorage,
+    job_queue: InMemoryJobQueue,
     filename: str,
     content_type: str,
 ) -> None:
@@ -144,6 +194,7 @@ async def test_upload_accepts_every_supported_format(
         document_repository,
         knowledge_base_repository,
         object_storage,
+        job_queue,
         knowledge_base_id=knowledge_base_id,
         filename=filename,
         content_type=content_type,
@@ -156,6 +207,7 @@ async def test_upload_rejects_unsupported_mime_type(
     document_repository: InMemoryDocumentRepository,
     knowledge_base_repository: InMemoryKnowledgeBaseRepository,
     object_storage: InMemoryObjectStorage,
+    job_queue: InMemoryJobQueue,
 ) -> None:
     knowledge_base_id = await _create_knowledge_base(knowledge_base_repository)
 
@@ -164,6 +216,7 @@ async def test_upload_rejects_unsupported_mime_type(
             document_repository,
             knowledge_base_repository,
             object_storage,
+            job_queue,
             knowledge_base_id=knowledge_base_id,
             filename="virus.exe",
             content_type="application/x-msdownload",
@@ -174,6 +227,7 @@ async def test_upload_rejects_extension_mismatched_with_mime_type(
     document_repository: InMemoryDocumentRepository,
     knowledge_base_repository: InMemoryKnowledgeBaseRepository,
     object_storage: InMemoryObjectStorage,
+    job_queue: InMemoryJobQueue,
 ) -> None:
     knowledge_base_id = await _create_knowledge_base(knowledge_base_repository)
 
@@ -182,6 +236,7 @@ async def test_upload_rejects_extension_mismatched_with_mime_type(
             document_repository,
             knowledge_base_repository,
             object_storage,
+            job_queue,
             knowledge_base_id=knowledge_base_id,
             filename="guia.txt",
             content_type="application/pdf",
@@ -192,6 +247,7 @@ async def test_upload_rejects_empty_filename(
     document_repository: InMemoryDocumentRepository,
     knowledge_base_repository: InMemoryKnowledgeBaseRepository,
     object_storage: InMemoryObjectStorage,
+    job_queue: InMemoryJobQueue,
 ) -> None:
     knowledge_base_id = await _create_knowledge_base(knowledge_base_repository)
 
@@ -200,6 +256,7 @@ async def test_upload_rejects_empty_filename(
             document_repository,
             knowledge_base_repository,
             object_storage,
+            job_queue,
             knowledge_base_id=knowledge_base_id,
             filename="   ",
         )
@@ -209,6 +266,7 @@ async def test_upload_rejects_empty_file(
     document_repository: InMemoryDocumentRepository,
     knowledge_base_repository: InMemoryKnowledgeBaseRepository,
     object_storage: InMemoryObjectStorage,
+    job_queue: InMemoryJobQueue,
 ) -> None:
     knowledge_base_id = await _create_knowledge_base(knowledge_base_repository)
 
@@ -217,6 +275,7 @@ async def test_upload_rejects_empty_file(
             document_repository,
             knowledge_base_repository,
             object_storage,
+            job_queue,
             knowledge_base_id=knowledge_base_id,
             content=b"",
         )
@@ -226,6 +285,7 @@ async def test_upload_rejects_file_larger_than_max_size(
     document_repository: InMemoryDocumentRepository,
     knowledge_base_repository: InMemoryKnowledgeBaseRepository,
     object_storage: InMemoryObjectStorage,
+    job_queue: InMemoryJobQueue,
 ) -> None:
     knowledge_base_id = await _create_knowledge_base(knowledge_base_repository)
 
@@ -234,6 +294,7 @@ async def test_upload_rejects_file_larger_than_max_size(
             document_repository,
             knowledge_base_repository,
             object_storage,
+            job_queue,
             knowledge_base_id=knowledge_base_id,
             content=b"x" * (MAX_SIZE + 1),
             max_size_bytes=MAX_SIZE,
@@ -244,6 +305,7 @@ async def test_upload_detects_duplicate_checksum_in_the_same_knowledge_base(
     document_repository: InMemoryDocumentRepository,
     knowledge_base_repository: InMemoryKnowledgeBaseRepository,
     object_storage: InMemoryObjectStorage,
+    job_queue: InMemoryJobQueue,
 ) -> None:
     knowledge_base_id = await _create_knowledge_base(knowledge_base_repository)
 
@@ -251,6 +313,7 @@ async def test_upload_detects_duplicate_checksum_in_the_same_knowledge_base(
         document_repository,
         knowledge_base_repository,
         object_storage,
+        job_queue,
         knowledge_base_id=knowledge_base_id,
         content=b"conteudo identico",
     )
@@ -260,6 +323,7 @@ async def test_upload_detects_duplicate_checksum_in_the_same_knowledge_base(
             document_repository,
             knowledge_base_repository,
             object_storage,
+            job_queue,
             knowledge_base_id=knowledge_base_id,
             filename="outro-nome.pdf",
             content=b"conteudo identico",
@@ -270,6 +334,7 @@ async def test_upload_same_idempotency_key_and_same_content_replays_without_crea
     document_repository: InMemoryDocumentRepository,
     knowledge_base_repository: InMemoryKnowledgeBaseRepository,
     object_storage: InMemoryObjectStorage,
+    job_queue: InMemoryJobQueue,
 ) -> None:
     knowledge_base_id = await _create_knowledge_base(knowledge_base_repository)
 
@@ -277,6 +342,7 @@ async def test_upload_same_idempotency_key_and_same_content_replays_without_crea
         document_repository,
         knowledge_base_repository,
         object_storage,
+        job_queue,
         knowledge_base_id=knowledge_base_id,
         idempotency_key="retry-1",
     )
@@ -286,6 +352,7 @@ async def test_upload_same_idempotency_key_and_same_content_replays_without_crea
         document_repository,
         knowledge_base_repository,
         object_storage,
+        job_queue,
         knowledge_base_id=knowledge_base_id,
         idempotency_key="retry-1",
     )
@@ -300,6 +367,7 @@ async def test_upload_same_idempotency_key_with_different_content_raises_conflic
     document_repository: InMemoryDocumentRepository,
     knowledge_base_repository: InMemoryKnowledgeBaseRepository,
     object_storage: InMemoryObjectStorage,
+    job_queue: InMemoryJobQueue,
 ) -> None:
     knowledge_base_id = await _create_knowledge_base(knowledge_base_repository)
 
@@ -307,6 +375,7 @@ async def test_upload_same_idempotency_key_with_different_content_raises_conflic
         document_repository,
         knowledge_base_repository,
         object_storage,
+        job_queue,
         knowledge_base_id=knowledge_base_id,
         idempotency_key="retry-2",
         content=b"conteudo original",
@@ -317,6 +386,7 @@ async def test_upload_same_idempotency_key_with_different_content_raises_conflic
             document_repository,
             knowledge_base_repository,
             object_storage,
+            job_queue,
             knowledge_base_id=knowledge_base_id,
             idempotency_key="retry-2",
             content=b"conteudo diferente, mesma chave",
@@ -327,6 +397,7 @@ async def test_upload_without_idempotency_key_creates_a_new_document_each_time(
     document_repository: InMemoryDocumentRepository,
     knowledge_base_repository: InMemoryKnowledgeBaseRepository,
     object_storage: InMemoryObjectStorage,
+    job_queue: InMemoryJobQueue,
 ) -> None:
     knowledge_base_id = await _create_knowledge_base(knowledge_base_repository)
 
@@ -334,6 +405,7 @@ async def test_upload_without_idempotency_key_creates_a_new_document_each_time(
         document_repository,
         knowledge_base_repository,
         object_storage,
+        job_queue,
         knowledge_base_id=knowledge_base_id,
         content=b"conteudo A",
     )
@@ -341,6 +413,7 @@ async def test_upload_without_idempotency_key_creates_a_new_document_each_time(
         document_repository,
         knowledge_base_repository,
         object_storage,
+        job_queue,
         knowledge_base_id=knowledge_base_id,
         content=b"conteudo B",
     )
@@ -363,6 +436,7 @@ class _RaceLosingDocumentRepository(InMemoryDocumentRepository):
 async def test_upload_translates_idempotency_key_race_conflict_to_conflict_error(
     knowledge_base_repository: InMemoryKnowledgeBaseRepository,
     object_storage: InMemoryObjectStorage,
+    job_queue: InMemoryJobQueue,
 ) -> None:
     knowledge_base_id = await _create_knowledge_base(knowledge_base_repository)
     document_repository = _RaceLosingDocumentRepository()
@@ -372,6 +446,7 @@ async def test_upload_translates_idempotency_key_race_conflict_to_conflict_error
             document_repository,
             knowledge_base_repository,
             object_storage,
+            job_queue,
             knowledge_base_id=knowledge_base_id,
             idempotency_key="racy-key",
         )

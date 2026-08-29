@@ -1,15 +1,21 @@
-"""Porta do repositório de documentos (RAG-021).
+"""Porta do repositório de documentos (RAG-021/RAG-022).
 
 Cria `Document` + `DocumentVersion` (v1) + `IndexJob` (INDEX, PENDING)
 juntos, na mesma transação lógica (seção 11, passo 5 do plano: "criar
 documento, versão e job na mesma transação lógica") — por isso é um
 único método (`create_document`), não três chamadas separadas a três
-repositórios. Publicar o job numa fila real (passo 6) é RAG-022; aqui o
-job só é persistido com `status=PENDING`.
+repositórios.
 
-Todo método recebe `tenant_id` explicitamente, mesmo princípio de
-`KnowledgeBaseRepositoryPort` (RAG-012): nenhuma consulta acontece sem
-esse filtro.
+Todo método que recebe `tenant_id` o recebe explicitamente, mesmo
+princípio de `KnowledgeBaseRepositoryPort` (RAG-012): nenhuma consulta
+de negócio acontece sem esse filtro. Os três métodos de ciclo de vida
+do `IndexJob` (`claim_index_job`/`mark_index_job_succeeded`/
+`mark_index_job_failed`, RAG-022) são a exceção: são chamados pelo
+worker a partir só do `index_job_id` (a mensagem da fila carrega só o
+id, ver `JobQueuePort`), um contexto interno sem tenant autenticado —
+não expostos a nenhum tenant diretamente (isso é RAG-027, endpoint
+`GET /v1/jobs/{id}`, que fará o isolamento por tenant na hora de expor
+o status ao cliente).
 """
 
 from __future__ import annotations
@@ -115,3 +121,34 @@ class DocumentRepositoryPort(ABC):
         Levanta `IdempotencyKeyConflictError` no caso raro de corrida
         descrito na classe.
         """
+
+    @abstractmethod
+    async def claim_index_job(self, *, index_job_id: UUID) -> IndexJob | None:
+        """Reivindica `index_job_id` para processamento: transição
+        atômica `PENDING -> RUNNING` — o "lock idempotente" do passo 7
+        (seção 11 do plano). Devolve o `IndexJob` já em `RUNNING` se a
+        reivindicação teve sucesso, ou `None` se o job não existe ou já
+        não está mais em `PENDING` (reivindicado por outro worker, ou
+        já terminal) — nesse caso, quem chama não deve processá-lo."""
+
+    @abstractmethod
+    async def mark_index_job_succeeded(self, *, index_job_id: UUID) -> None:
+        """Marca `index_job_id` como `SUCCEEDED`."""
+
+    @abstractmethod
+    async def mark_index_job_failed(
+        self,
+        *,
+        index_job_id: UUID,
+        attempts: int,
+        error_code: str,
+        error_message: str,
+        final: bool,
+    ) -> None:
+        """Registra uma tentativa falha de `index_job_id`: atualiza
+        `attempts`/`error_code`/`error_message`. Se `final=True`, marca
+        `status=FAILED` (falha definitiva — critério de aceite do
+        RAG-022); caso contrário, mantém `status=RUNNING` (o Celery
+        ainda vai reagendar esta mesma tentativa lógica com backoff
+        exponencial — não há necessidade de reivindicar o job de novo,
+        `claim_index_job` só é chamado na primeira tentativa)."""

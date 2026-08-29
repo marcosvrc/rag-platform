@@ -1,4 +1,4 @@
-"""Adapter Postgres de `DocumentRepositoryPort` (RAG-021).
+"""Adapter Postgres de `DocumentRepositoryPort` (RAG-021/RAG-022).
 
 Mesma filosofia de `adapters/knowledge_base_repository/postgres.py`
 (RAG-012): sem uma abstração de unit-of-work compartilhada entre
@@ -34,7 +34,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -228,3 +228,54 @@ class PostgresDocumentRepository(DocumentRepositoryPort):
             index_job=_job_to_entity(job_model),
             replayed=False,
         )
+
+    async def claim_index_job(self, *, index_job_id: UUID) -> IndexJob | None:
+        # UPDATE ... WHERE status = PENDING ... RETURNING é atômico no
+        # Postgres: duas reivindicações concorrentes do mesmo job nunca
+        # veem as duas a condição satisfeita — só uma linha é afetada
+        # (o "lock idempotente" do passo 7, seção 11 do plano).
+        stmt = (
+            update(IndexJobModel)
+            .where(
+                IndexJobModel.id == index_job_id,
+                IndexJobModel.status == ProcessingStatus.PENDING,
+            )
+            .values(status=ProcessingStatus.RUNNING, updated_at=datetime.now(UTC))
+            .returning(IndexJobModel)
+        )
+        result = await self._session.execute(stmt)
+        job_model = result.scalar_one_or_none()
+        await self._session.commit()
+        return _job_to_entity(job_model) if job_model is not None else None
+
+    async def mark_index_job_succeeded(self, *, index_job_id: UUID) -> None:
+        stmt = (
+            update(IndexJobModel)
+            .where(IndexJobModel.id == index_job_id)
+            .values(status=ProcessingStatus.SUCCEEDED, updated_at=datetime.now(UTC))
+        )
+        await self._session.execute(stmt)
+        await self._session.commit()
+
+    async def mark_index_job_failed(
+        self,
+        *,
+        index_job_id: UUID,
+        attempts: int,
+        error_code: str,
+        error_message: str,
+        final: bool,
+    ) -> None:
+        stmt = (
+            update(IndexJobModel)
+            .where(IndexJobModel.id == index_job_id)
+            .values(
+                status=ProcessingStatus.FAILED if final else ProcessingStatus.RUNNING,
+                attempts=attempts,
+                error_code=error_code,
+                error_message=error_message,
+                updated_at=datetime.now(UTC),
+            )
+        )
+        await self._session.execute(stmt)
+        await self._session.commit()

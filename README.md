@@ -429,8 +429,9 @@ do plano): valida extensão/MIME type/tamanho, calcula SHA-256, detecta
 duplicidade, armazena o arquivo original (`ObjectStoragePort`, RAG-020)
 e cria `Document` (`PENDING`) + `DocumentVersion` (v1) + `IndexJob`
 (`INDEX`, `PENDING`) numa única transação — devolve `202 Accepted`. O
-passo 6 (publicar o job numa fila real) é RAG-022; aqui o job só fica
-persistido como pendente.
+job criado é publicado na fila (passo 6, RAG-022 — ver seção abaixo)
+logo em seguida, exceto numa repetição idempotente (nada novo foi
+criado, o job original já está — ou já foi — na fila).
 
 Formatos aceitos (fixos, seção 2 do plano — não configuráveis por
 ambiente): PDF, Markdown, TXT e DOCX; a extensão do arquivo precisa
@@ -458,6 +459,61 @@ Testes: `tests/unit/test_document_repository_in_memory.py` (contrato
 da porta), `tests/unit/test_document_upload_command.py` (validação,
 duplicidade, idempotência) e `tests/unit/test_document_router.py`
 (visão HTTP, isolamento por tenant).
+## Fila e worker de indexação (RAG-022)
+
+Implementa os passos 6-7 do fluxo de indexação (seção 11 do plano):
+publicar o `IndexJob` criado pelo RAG-021 numa fila e o worker adquirir
+um lock idempotente antes de processá-lo. A extração/normalização/
+chunking/embeddings/persistência em si (passos 8-14) ainda não existem
+— isso é RAG-023 a RAG-027.
+
+`packages/application/ports/job_queue.py` define `JobQueuePort`
+(`enqueue_index_job`) — só o `id` do job é publicado, nunca o payload;
+`adapters/queue/celery_job_queue.py` (`CeleryJobQueue`) publica via
+Celery/Redis (broker e result backend = `Settings.redis_url`).
+`adapters/queue/celery_app.py` mantém uma única app Celery compartilhada
+entre produtor (API) e consumidor (worker), sem broker configurado até
+`configure_celery_app(settings)` ser chamada explicitamente por quem
+tem um `Settings` válido — nunca no import do módulo, para que
+`adapters.queue`/`apps.indexing_worker` continuem importáveis sem
+nenhuma infraestrutura (RAG-001).
+
+`apps/indexing_worker/tasks.py` (`process_index_job_task`) é a task
+Celery: um adapter fino que só traduz a contagem de tentativas do
+Celery (`self.request.retries`) para uma chamada a
+`packages/application/commands/index_job.py::process_index_job_attempt`
+— a lógica de negócio de verdade, testável sem Celery nenhum:
+
+- Primeira tentativa: reivindica o job (`claim_index_job`, transição
+  atômica `PENDING -> RUNNING`) — o lock idempotente do passo 7. Se já
+  foi reivindicado por outro worker (ou não existe mais), não processa.
+- Sucesso: `mark_index_job_succeeded`.
+- Falha com tentativas restantes: registra a tentativa
+  (`mark_index_job_failed`, `final=False`) e levanta
+  `RetryableIndexJobError`, que a task Celery reagenda automaticamente
+  (`autoretry_for`) com backoff exponencial (`retry_backoff=True`,
+  jitter, teto de 10 min) — 5 tentativas no total, um ponto de partida
+  razoável (o plano não especifica o número).
+- Falha na última tentativa: registra como definitiva
+  (`mark_index_job_failed`, `final=True`, `status=FAILED`) e não
+  reagenda mais — o critério de aceite "falha definitiva é registrada".
+
+O processamento em si (`DocumentProcessorPort.process`) ainda não tem
+implementação real: `adapters/document_processor/not_implemented.py`
+é o placeholder usado em produção até o RAG-023 existir — todo job
+enfileirado hoje falha definitivamente de propósito, nunca "sucede"
+silenciosamente sem processar nada.
+
+`apps/indexing_worker/worker.py` é o ponto de entrada real do processo
+(`celery -A apps.indexing_worker.worker worker`) — só ele lê `Settings`
+de verdade; `apps/indexing_worker/tasks.py` e `adapters/queue/celery_app.py`
+continuam importáveis sem nenhuma configuração.
+
+Testes: `tests/unit/test_index_job_processing.py` (reivindicação,
+sucesso, retry, falha definitiva — sem Celery), `tests/unit/test_celery_job_queue.py`
+(adapter produtor) e `tests/unit/test_indexing_worker_task.py` (fiação
+da task Celery: nome registrado, configuração de retry, repasse de
+`self.request.retries`).
 ## Autenticação JWT (RAG-050)
 
 `packages/application/ports/token_verifier.py` define `TokenVerifierPort`

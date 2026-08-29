@@ -1,9 +1,12 @@
-"""Endpoint de upload de documentos (RAG-021, seção 10.2 do plano).
+"""Endpoint de upload de documentos (RAG-021/RAG-022, seção 10.2 do plano).
 
 Mesmo isolamento por tenant de `apps/api/routers/knowledge_bases.py`
 (RAG-012/RAG-051): `tenant_id` vem de `get_current_tenant_id`
 (resolvido a partir de um JWT autenticado) e é repassado explicitamente;
-uma base de outro tenant (ou inexistente) retorna 404, nunca 403.
+uma base de outro tenant (ou inexistente) retorna 404, nunca 403. Após
+persistir documento/versão/job (RAG-021), o job é publicado na fila
+(RAG-022, `get_job_queue`) para processamento assíncrono pelo
+`apps/indexing_worker`.
 """
 
 from __future__ import annotations
@@ -16,10 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from adapters.document_repository import PostgresDocumentRepository
 from adapters.object_storage.s3_object_storage import S3ObjectStorage
 from adapters.postgres.engine import get_session
+from adapters.queue.celery_job_queue import CeleryJobQueue
 from apps.api.dependencies import get_current_tenant_id, get_settings_dependency
 from apps.api.routers.knowledge_bases import get_knowledge_base_repository
 from packages.application.commands import document as document_commands
 from packages.application.ports.document_repository import DocumentRepositoryPort, DocumentUpload
+from packages.application.ports.job_queue import JobQueuePort
 from packages.application.ports.knowledge_base_repository import KnowledgeBaseRepositoryPort
 from packages.application.ports.object_storage import ObjectStoragePort
 from packages.config.settings import Settings
@@ -41,6 +46,14 @@ async def get_object_storage(
     settings: Settings = Depends(get_settings_dependency),
 ) -> ObjectStoragePort:
     return S3ObjectStorage(settings)
+
+
+async def get_job_queue(
+    settings: Settings = Depends(get_settings_dependency),
+) -> JobQueuePort:
+    """`Depends()` próprio, mesmo padrão de `get_object_storage` — os
+    testes sobrescrevem via `app.dependency_overrides` (RAG-022)."""
+    return CeleryJobQueue(settings)
 
 
 def _to_response(upload: DocumentUpload) -> DocumentUploadResponse:
@@ -73,12 +86,14 @@ async def upload_document(
     document_repository: DocumentRepositoryPort = Depends(get_document_repository),
     knowledge_base_repository: KnowledgeBaseRepositoryPort = Depends(get_knowledge_base_repository),
     object_storage: ObjectStoragePort = Depends(get_object_storage),
+    job_queue: JobQueuePort = Depends(get_job_queue),
 ) -> DocumentUploadResponse:
     content = await file.read()
     upload = await document_commands.upload_document(
         document_repository,
         knowledge_base_repository,
         object_storage,
+        job_queue,
         tenant_id=tenant_id,
         knowledge_base_id=knowledge_base_id,
         filename=file.filename or "",

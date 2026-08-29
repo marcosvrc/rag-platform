@@ -16,7 +16,7 @@ verificado.
 
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import jwt
@@ -27,10 +27,11 @@ from pydantic import SecretStr
 from adapters.document_repository.in_memory import InMemoryDocumentRepository
 from adapters.knowledge_base_repository.in_memory import InMemoryKnowledgeBaseRepository
 from adapters.object_storage.in_memory import InMemoryObjectStorage
+from adapters.queue.in_memory import InMemoryJobQueue
 from apps.api import main
 from apps.api.dependencies import get_settings_dependency
 from apps.api.errors import PROBLEM_JSON_MEDIA_TYPE
-from apps.api.routers.documents import get_document_repository, get_object_storage
+from apps.api.routers.documents import get_document_repository, get_job_queue, get_object_storage
 from apps.api.routers.knowledge_bases import get_knowledge_base_repository
 from packages.config.settings import Settings
 
@@ -90,14 +91,21 @@ def object_storage() -> InMemoryObjectStorage:
 
 
 @pytest.fixture
+def job_queue() -> InMemoryJobQueue:
+    return InMemoryJobQueue()
+
+
+@pytest.fixture
 def client(
     knowledge_base_repository: InMemoryKnowledgeBaseRepository,
     document_repository: InMemoryDocumentRepository,
     object_storage: InMemoryObjectStorage,
+    job_queue: InMemoryJobQueue,
 ) -> Iterator[TestClient]:
     main.app.dependency_overrides[get_knowledge_base_repository] = lambda: knowledge_base_repository
     main.app.dependency_overrides[get_document_repository] = lambda: document_repository
     main.app.dependency_overrides[get_object_storage] = lambda: object_storage
+    main.app.dependency_overrides[get_job_queue] = lambda: job_queue
     main.app.dependency_overrides[get_settings_dependency] = lambda: _test_settings()
     try:
         yield TestClient(main.app)
@@ -146,6 +154,15 @@ def test_upload_returns_202_with_pending_document_and_job(client: TestClient) ->
     assert body["version"] == 1
     assert body["index_job_status"] == "PENDING"
     assert body["index_job_type"] == "INDEX"
+
+
+def test_upload_enqueues_the_index_job(client: TestClient, job_queue: InMemoryJobQueue) -> None:
+    knowledge_base_id = _create_knowledge_base(client)
+
+    response = _upload_pdf(client, knowledge_base_id)
+
+    index_job_id = UUID(response.json()["index_job_id"])
+    assert job_queue.enqueued_index_job_ids == [index_job_id]
 
 
 def test_upload_requires_authorization_header(client: TestClient) -> None:

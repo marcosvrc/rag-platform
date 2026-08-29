@@ -1,7 +1,8 @@
-"""Testes de RAG-021: `InMemoryDocumentRepository` — mesmo contrato da
-porta (`DocumentRepositoryPort`) que o adapter Postgres real."""
+"""Testes de RAG-021/RAG-022: `InMemoryDocumentRepository` — mesmo
+contrato da porta (`DocumentRepositoryPort`) que o adapter Postgres
+real, incluindo o ciclo de vida do `IndexJob` (RAG-022)."""
 
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -158,3 +159,97 @@ async def test_idempotency_key_is_scoped_per_tenant_and_knowledge_base(
 
     assert found_other_tenant is None
     assert found_other_kb is None
+
+
+async def _create_index_job(repository: InMemoryDocumentRepository) -> UUID:
+    upload = await repository.create_document(
+        tenant_id=TENANT_ID,
+        knowledge_base_id=KNOWLEDGE_BASE_ID,
+        name="guia.pdf",
+        mime_type="application/pdf",
+        checksum=str(uuid4()) + "a" * 28,
+        object_key="kb/checksum/guia.pdf",
+        idempotency_key=None,
+    )
+    return upload.index_job.id
+
+
+class TestIndexJobLifecycle:
+    """RAG-022: reivindicação (lock idempotente), sucesso e falha
+    (com/sem tentativas restantes) de um `IndexJob`."""
+
+    async def test_claim_index_job_transitions_pending_to_running(
+        self, repository: InMemoryDocumentRepository
+    ) -> None:
+        index_job_id = await _create_index_job(repository)
+
+        claimed = await repository.claim_index_job(index_job_id=index_job_id)
+
+        assert claimed is not None
+        assert claimed.status == ProcessingStatus.RUNNING
+
+    async def test_claim_index_job_twice_returns_none_on_the_second_call(
+        self, repository: InMemoryDocumentRepository
+    ) -> None:
+        index_job_id = await _create_index_job(repository)
+
+        first = await repository.claim_index_job(index_job_id=index_job_id)
+        second = await repository.claim_index_job(index_job_id=index_job_id)
+
+        assert first is not None
+        assert second is None
+
+    async def test_claim_index_job_returns_none_for_unknown_id(
+        self, repository: InMemoryDocumentRepository
+    ) -> None:
+        claimed = await repository.claim_index_job(index_job_id=uuid4())
+        assert claimed is None
+
+    async def test_mark_index_job_succeeded_sets_status(
+        self, repository: InMemoryDocumentRepository
+    ) -> None:
+        index_job_id = await _create_index_job(repository)
+        await repository.claim_index_job(index_job_id=index_job_id)
+
+        await repository.mark_index_job_succeeded(index_job_id=index_job_id)
+
+        job = repository._jobs[index_job_id]
+        assert job.status == ProcessingStatus.SUCCEEDED
+
+    async def test_mark_index_job_failed_not_final_keeps_status_running(
+        self, repository: InMemoryDocumentRepository
+    ) -> None:
+        index_job_id = await _create_index_job(repository)
+        await repository.claim_index_job(index_job_id=index_job_id)
+
+        await repository.mark_index_job_failed(
+            index_job_id=index_job_id,
+            attempts=1,
+            error_code="RuntimeError",
+            error_message="falha transitória",
+            final=False,
+        )
+
+        job = repository._jobs[index_job_id]
+        assert job.status == ProcessingStatus.RUNNING
+        assert job.attempts == 1
+        assert job.error_code == "RuntimeError"
+        assert job.error_message == "falha transitória"
+
+    async def test_mark_index_job_failed_final_sets_status_failed(
+        self, repository: InMemoryDocumentRepository
+    ) -> None:
+        index_job_id = await _create_index_job(repository)
+        await repository.claim_index_job(index_job_id=index_job_id)
+
+        await repository.mark_index_job_failed(
+            index_job_id=index_job_id,
+            attempts=5,
+            error_code="RuntimeError",
+            error_message="falha definitiva",
+            final=True,
+        )
+
+        job = repository._jobs[index_job_id]
+        assert job.status == ProcessingStatus.FAILED
+        assert job.attempts == 5
