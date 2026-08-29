@@ -27,6 +27,8 @@ Concluído até o momento:
   máquina de estados de `Document`).
 - **RAG-011 — Criar schema inicial** (tabelas, constraints, FKs e
   índices do modelo mínimo, migration 0002).
+- **RAG-013 — Tratamento padronizado de erros** (Problem Details,
+  RFC 7807, com `request_id` de correlação).
 - **RAG-020 — Implementar porta de object storage** (interface +
   adapter MinIO/S3 via `aioboto3`, sanitização de key, checksum).
 
@@ -112,6 +114,38 @@ curl -i http://localhost:8000/health/ready
 processo está no ar, para não ser derrubado por uma falha temporária de
 uma dependência (isso é papel do `/health/ready`). Endpoints de negócio
 (`/v1/...`) chegam a partir de RAG-012.
+
+## Tratamento de erros (RAG-013)
+
+Qualquer erro em um endpoint de negócio vira
+[Problem Details](https://www.rfc-editor.org/rfc/rfc7807) (RFC 7807,
+`application/problem+json`), nunca uma stack trace:
+
+```bash
+curl -i http://localhost:8000/qualquer-rota-que-nao-existe
+# HTTP/1.1 404 Not Found
+# content-type: application/problem+json
+# x-request-id: 3fa2c1c0-...
+#
+# {"type": "about:blank", "title": "Not Found", "status": 404,
+#  "instance": "/qualquer-rota-que-nao-existe", "request_id": "3fa2c1c0-..."}
+```
+
+- `packages/application/errors.py`: categorias de erro independentes de
+  HTTP (`NotFoundError`, `ConflictError`, etc.) — usadas pelos casos de
+  uso, sem nenhum acoplamento a FastAPI.
+- `packages/contracts/problem_details.py`: o schema `ProblemDetail`
+  (Pydantic) que toda resposta de erro segue.
+- `apps/api/errors.py`: traduz cada erro de aplicação (e também
+  `DomainError`/`InvalidStatusTransitionError` de RAG-010, sempre como
+  409; `HTTPException`; erros de validação do Pydantic; e qualquer
+  exceção não tratada, como 500) para Problem Details, e atribui um
+  `request_id` de correlação a cada requisição (lido de `X-Request-ID`
+  se o cliente enviar um, senão gerado) — presente tanto no corpo quanto
+  no header `X-Request-ID` da resposta, em qualquer status.
+- `/health/live` e `/health/ready` (RAG-005) mantêm o próprio formato
+  (`{"status": ..., "checks": {...}}`) — são um contrato à parte, não
+  endpoints de negócio.
 
 ## CI (RAG-070)
 
