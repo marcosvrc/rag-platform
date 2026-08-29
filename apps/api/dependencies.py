@@ -5,9 +5,13 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import Depends, Header
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from adapters.audit_log.postgres import PostgresAuditLogRepository
+from adapters.postgres.engine import get_session
 from adapters.token_verifier.pyjwt_verifier import PyJWTTokenVerifier
 from packages.application.errors import AuthenticationError
+from packages.application.ports.audit_log import AuditLogPort
 from packages.application.ports.token_verifier import TokenClaims, TokenVerifierPort
 from packages.config.settings import Settings, get_settings
 
@@ -81,3 +85,15 @@ async def get_current_tenant_id(
     if identity.tenant_id is None:
         raise AuthenticationError(detail="Token válido, mas sem a claim 'tenant_id' obrigatória.")
     return identity.tenant_id
+
+
+async def get_audit_log(session: AsyncSession = Depends(get_session)) -> AuditLogPort:
+    """Fábrica do trilho de auditoria (RAG-054), usado por
+    `apps.api.routers.knowledge_bases` e `apps.api.routers.documents`.
+
+    Mesmo padrão de `get_token_verifier`/`get_object_storage`: os
+    testes trocam por `InMemoryAuditLog` via
+    `app.dependency_overrides[get_audit_log]`, nunca falam com um
+    Postgres real.
+    """
+    return PostgresAuditLogRepository(session)

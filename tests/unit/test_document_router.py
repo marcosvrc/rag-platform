@@ -25,12 +25,13 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
+from adapters.audit_log.in_memory import InMemoryAuditLog
 from adapters.document_repository.in_memory import InMemoryDocumentRepository
 from adapters.knowledge_base_repository.in_memory import InMemoryKnowledgeBaseRepository
 from adapters.object_storage.in_memory import InMemoryObjectStorage
 from adapters.queue.in_memory import InMemoryJobQueue
 from apps.api import main
-from apps.api.dependencies import get_settings_dependency
+from apps.api.dependencies import get_audit_log, get_settings_dependency
 from apps.api.errors import PROBLEM_JSON_MEDIA_TYPE
 from apps.api.routers.documents import get_document_repository, get_job_queue, get_object_storage
 from apps.api.routers.knowledge_bases import get_knowledge_base_repository
@@ -97,16 +98,23 @@ def job_queue() -> InMemoryJobQueue:
 
 
 @pytest.fixture
+def audit_log() -> InMemoryAuditLog:
+    return InMemoryAuditLog()
+
+
+@pytest.fixture
 def client(
     knowledge_base_repository: InMemoryKnowledgeBaseRepository,
     document_repository: InMemoryDocumentRepository,
     object_storage: InMemoryObjectStorage,
     job_queue: InMemoryJobQueue,
+    audit_log: InMemoryAuditLog,
 ) -> Iterator[TestClient]:
     main.app.dependency_overrides[get_knowledge_base_repository] = lambda: knowledge_base_repository
     main.app.dependency_overrides[get_document_repository] = lambda: document_repository
     main.app.dependency_overrides[get_object_storage] = lambda: object_storage
     main.app.dependency_overrides[get_job_queue] = lambda: job_queue
+    main.app.dependency_overrides[get_audit_log] = lambda: audit_log
     main.app.dependency_overrides[get_settings_dependency] = lambda: _test_settings()
     try:
         yield TestClient(main.app)
@@ -372,3 +380,53 @@ def test_reindex_another_tenants_document_returns_404(
     )
 
     assert response.status_code == 404
+
+
+class TestAuditLog:
+    """RAG-054: enviar/reindexar documento registra um evento de
+    auditoria com ator, tenant, ação e recurso corretos."""
+
+    def test_upload_records_an_audit_event(
+        self, client: TestClient, audit_log: InMemoryAuditLog
+    ) -> None:
+        knowledge_base_id = _create_knowledge_base(client)
+        audit_log.events.clear()
+
+        response = _upload_pdf(client, knowledge_base_id)
+
+        assert len(audit_log.events) == 1
+        event = audit_log.events[0]
+        assert event.action == "document.upload"
+        assert event.resource_type == "document"
+        assert str(event.resource_id) == response.json()["document_id"]
+        assert event.actor == "test-user"
+        assert str(event.tenant_id) == TENANT_A
+
+    def test_reindex_records_an_audit_event(
+        self,
+        client: TestClient,
+        document_repository: InMemoryDocumentRepository,
+        audit_log: InMemoryAuditLog,
+    ) -> None:
+        knowledge_base_id = _create_knowledge_base(client)
+        upload_response = _upload_pdf(client, knowledge_base_id)
+        document_id = upload_response.json()["document_id"]
+        version = asyncio.run(document_repository.get_latest_version(document_id=UUID(document_id)))
+        assert version is not None
+        asyncio.run(
+            _index_document(
+                document_repository, document_id=UUID(document_id), version_id=version.id
+            )
+        )
+        audit_log.events.clear()
+
+        client.post(
+            f"/v1/knowledge-bases/{knowledge_base_id}/documents/{document_id}/reindex",
+            headers=_headers(),
+        )
+
+        assert len(audit_log.events) == 1
+        event = audit_log.events[0]
+        assert event.action == "document.reindex"
+        assert event.resource_type == "document"
+        assert str(event.resource_id) == document_id

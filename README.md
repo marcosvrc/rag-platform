@@ -989,6 +989,54 @@ de fato (via `EXPLAIN` contra um Postgres real) fica para
 documentada para os demais adapters Postgres deste projeto.
 
 
+## Auditoria de ações administrativas (RAG-054)
+
+Registra um evento de auditoria (ator, tenant, ação, tipo/id de
+recurso, timestamp) para cada ação administrativa que já existe hoje
+na API: criar/atualizar/excluir base de conhecimento (RAG-012) e
+enviar/reindexar documento (RAG-021/RAG-027). Escopo desta atividade:
+"registrar", não "consultar" — um endpoint de leitura do trilho de
+auditoria (para um painel administrativo, por exemplo) fica para uma
+atividade futura, então `packages/application/ports/audit_log.py`
+(`AuditLogPort`) só tem `record`.
+
+Append-only por design, não por convenção: nem a porta nem nenhum
+adapter (`adapters/audit_log/`) declara um método de atualização ou
+remoção. `migrations/versions/0005_create_audit_events.py` cria
+`audit_events` — `resource_id` não é uma foreign key (é polimórfico:
+aponta para `knowledge_bases.id` OU `documents.id`, dependendo de
+`resource_type`, e uma FK exigiria uma única tabela de destino);
+`tenant_id` é FK normal para `tenants.id`, com o mesmo índice que
+todas as outras tabelas multi-tenant deste schema (RAG-011). Não é
+uma entidade de domínio (mesmo precedente de
+`document_idempotency_keys`, RAG-021): infraestrutura de aplicação,
+então só existe em `adapters/postgres/models/audit_event.py`, nunca
+em `packages/domain/entities`.
+
+Uma falha ao registrar um evento (ex.: banco indisponível) nunca deve
+derrubar a ação administrativa que já teve sucesso — isso trocaria
+uma falha de observabilidade por uma indisponibilidade real da API.
+`record_audit_event_safely` (mesmo módulo da porta) é o que os
+routers chamam em vez de `audit_log.record(...)` direto: registra a
+falha via `logging` (nunca engole em silêncio) e sempre retorna
+normalmente. `actor` vem de `TokenClaims.subject` (RAG-050/RAG-051,
+`Depends(get_current_identity)`, já injetado nos endpoints
+existentes ao lado de `Depends(get_current_tenant_id)` — mesma
+identidade, sem verificar o token duas vezes).
+
+`adapters/audit_log/in_memory.py` (`InMemoryAuditLog`) expõe
+`events: list[AuditEvent]` — não faz parte da porta, é só para os
+testes inspecionarem o que foi registrado (mesmo padrão de
+`InMemoryLexicalSearch.index_chunk`, RAG-031).
+
+Testes: `tests/unit/test_audit_log.py` cobre o contrato da porta e
+`record_audit_event_safely` (inclusive que uma falha de gravação
+nunca propaga); `tests/unit/test_schema.py` cobre o formato da tabela
+(colunas obrigatórias, `resource_id` sem FK); e cada router de teste
+(`test_knowledge_base_router.py`, `test_document_router.py`) tem uma
+classe `TestAuditLog` provando que a ação HTTP correspondente
+registrou exatamente um evento com o ator/tenant/ação/recurso
+esperados.
 ## Tracing distribuído (RAG-052)
 
 Instrumenta a API e o worker de indexação com OpenTelemetry, cobrindo

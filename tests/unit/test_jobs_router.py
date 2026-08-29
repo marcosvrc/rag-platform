@@ -16,12 +16,13 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
+from adapters.audit_log.in_memory import InMemoryAuditLog
 from adapters.document_repository.in_memory import InMemoryDocumentRepository
 from adapters.knowledge_base_repository.in_memory import InMemoryKnowledgeBaseRepository
 from adapters.object_storage.in_memory import InMemoryObjectStorage
 from adapters.queue.in_memory import InMemoryJobQueue
 from apps.api import main
-from apps.api.dependencies import get_settings_dependency
+from apps.api.dependencies import get_audit_log, get_settings_dependency
 from apps.api.errors import PROBLEM_JSON_MEDIA_TYPE
 from apps.api.routers.documents import get_document_repository, get_job_queue, get_object_storage
 from apps.api.routers.knowledge_bases import get_knowledge_base_repository
@@ -88,16 +89,23 @@ def job_queue() -> InMemoryJobQueue:
 
 
 @pytest.fixture
+def audit_log() -> InMemoryAuditLog:
+    return InMemoryAuditLog()
+
+
+@pytest.fixture
 def client(
     knowledge_base_repository: InMemoryKnowledgeBaseRepository,
     document_repository: InMemoryDocumentRepository,
     object_storage: InMemoryObjectStorage,
     job_queue: InMemoryJobQueue,
+    audit_log: InMemoryAuditLog,
 ) -> Iterator[TestClient]:
     main.app.dependency_overrides[get_knowledge_base_repository] = lambda: knowledge_base_repository
     main.app.dependency_overrides[get_document_repository] = lambda: document_repository
     main.app.dependency_overrides[get_object_storage] = lambda: object_storage
     main.app.dependency_overrides[get_job_queue] = lambda: job_queue
+    main.app.dependency_overrides[get_audit_log] = lambda: audit_log
     main.app.dependency_overrides[get_settings_dependency] = lambda: _test_settings()
     try:
         yield TestClient(main.app)

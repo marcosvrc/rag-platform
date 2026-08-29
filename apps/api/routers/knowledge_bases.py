@@ -18,9 +18,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from adapters.knowledge_base_repository import PostgresKnowledgeBaseRepository
 from adapters.postgres.engine import get_session
-from apps.api.dependencies import get_current_tenant_id
+from apps.api.dependencies import get_audit_log, get_current_identity, get_current_tenant_id
 from packages.application.commands import knowledge_base as kb_commands
+from packages.application.ports.audit_log import AuditLogPort, record_audit_event_safely
 from packages.application.ports.knowledge_base_repository import KnowledgeBaseRepositoryPort
+from packages.application.ports.token_verifier import TokenClaims
 from packages.application.queries import knowledge_base as kb_queries
 from packages.contracts.knowledge_base import (
     KnowledgeBaseCreateRequest,
@@ -59,7 +61,9 @@ def _to_response(knowledge_base: KnowledgeBase) -> KnowledgeBaseResponse:
 async def create_knowledge_base(
     payload: KnowledgeBaseCreateRequest,
     tenant_id: UUID = Depends(get_current_tenant_id),
+    identity: TokenClaims = Depends(get_current_identity),
     repository: KnowledgeBaseRepositoryPort = Depends(get_knowledge_base_repository),
+    audit_log: AuditLogPort = Depends(get_audit_log),
 ) -> KnowledgeBaseResponse:
     knowledge_base = await kb_commands.create_knowledge_base(
         repository,
@@ -67,6 +71,14 @@ async def create_knowledge_base(
         name=payload.name,
         description=payload.description,
         config=payload.config,
+    )
+    await record_audit_event_safely(
+        audit_log,
+        tenant_id=tenant_id,
+        actor=identity.subject,
+        action="knowledge_base.create",
+        resource_type="knowledge_base",
+        resource_id=knowledge_base.id,
     )
     return _to_response(knowledge_base)
 
@@ -103,11 +115,21 @@ async def update_knowledge_base(
     knowledge_base_id: UUID,
     payload: KnowledgeBaseUpdateRequest,
     tenant_id: UUID = Depends(get_current_tenant_id),
+    identity: TokenClaims = Depends(get_current_identity),
     repository: KnowledgeBaseRepositoryPort = Depends(get_knowledge_base_repository),
+    audit_log: AuditLogPort = Depends(get_audit_log),
 ) -> KnowledgeBaseResponse:
     fields = payload.model_dump(exclude_unset=True)
     knowledge_base = await kb_commands.update_knowledge_base(
         repository, tenant_id=tenant_id, knowledge_base_id=knowledge_base_id, fields=fields
+    )
+    await record_audit_event_safely(
+        audit_log,
+        tenant_id=tenant_id,
+        actor=identity.subject,
+        action="knowledge_base.update",
+        resource_type="knowledge_base",
+        resource_id=knowledge_base_id,
     )
     return _to_response(knowledge_base)
 
@@ -116,9 +138,19 @@ async def update_knowledge_base(
 async def delete_knowledge_base(
     knowledge_base_id: UUID,
     tenant_id: UUID = Depends(get_current_tenant_id),
+    identity: TokenClaims = Depends(get_current_identity),
     repository: KnowledgeBaseRepositoryPort = Depends(get_knowledge_base_repository),
+    audit_log: AuditLogPort = Depends(get_audit_log),
 ) -> Response:
     await kb_commands.delete_knowledge_base(
         repository, tenant_id=tenant_id, knowledge_base_id=knowledge_base_id
+    )
+    await record_audit_event_safely(
+        audit_log,
+        tenant_id=tenant_id,
+        actor=identity.subject,
+        action="knowledge_base.delete",
+        resource_type="knowledge_base",
+        resource_id=knowledge_base_id,
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
