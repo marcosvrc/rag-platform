@@ -27,6 +27,8 @@ Concluído até o momento:
   máquina de estados de `Document`).
 - **RAG-011 — Criar schema inicial** (tabelas, constraints, FKs e
   índices do modelo mínimo, migration 0002).
+- **RAG-071 — Adicionar segurança ao CI** (secret scanning, SAST, SCA e
+  lint de Dockerfile, com governança de exceções).
 
 ## Desenvolvimento local
 
@@ -136,6 +138,46 @@ Escopo desta atividade (RAG-070): apenas o workflow de PR. Secret
 scanning/SAST/SCA (RAG-071), build e publicação de imagens no GHCR
 (RAG-072) e o quality gate de avaliação RAG (RAG-073) ficam para
 atividades seguintes, como o backlog já prevê.
+
+## Segurança no CI (RAG-071)
+
+`.github/workflows/security.yml` roda em toda PR contra `master`, em
+paralelo a `pull-request.yml`, com cinco jobs:
+
+| Job | Ferramenta | O que valida | Bloqueia quando |
+| --- | --- | --- | --- |
+| Secret scanning | [gitleaks](https://github.com/gitleaks/gitleaks) | histórico completo do git em busca de segredos | qualquer segredo encontrado |
+| SAST | [bandit](https://bandit.readthedocs.io/) (`make security`) | código próprio (`apps`, `packages`, `adapters`) | achado de severidade **HIGH** (LOW/MEDIUM ficam visíveis no log, sem bloquear) |
+| SCA | [pip-audit](https://github.com/pypa/pip-audit) (`make security`) | dependências instaladas contra bases de advisories conhecidas | qualquer vulnerabilidade conhecida |
+| Lint de Dockerfile | [hadolint](https://github.com/hadolint/hadolint) | todo `Dockerfile*` do repositório | regra de nível **error** (ainda não há Dockerfile — este job passa trivialmente até o RAG-072 introduzir um) |
+| Exceções de segurança | `scripts/check_security_exceptions.py` (`make security`) | `security/exceptions.yml` | entrada sem justificativa/prazo, ou prazo vencido |
+
+Decisões e limitações:
+
+- **Exceções exigem prazo e justificativa.** Uma supressão pontual (um
+  `# nosec` do bandit, uma entrada na allowlist do `.gitleaks.toml`, um
+  `--ignore-vuln` do pip-audit, uma regra em `ignored:` no
+  `.hadolint.yaml`) só é legítima se tiver uma entrada correspondente
+  em `security/exceptions.yml` com `justification` e `expires`
+  (`AAAA-MM-DD`). O job falha a PR se uma entrada estiver incompleta
+  ou vencida — a exceção precisa ser renovada ou o achado corrigido.
+- **pip-audit trata toda vulnerabilidade conhecida como bloqueante.**
+  As bases de advisories do ecossistema Python nem sempre expõem um
+  nível de severidade consistente; tratar qualquer achado como
+  bloqueante é o padrão mais seguro. Foi assim que esta atividade
+  encontrou e corrigiu o PYSEC-2026-1845 (pytest < 9.0.3):
+  o teto de versão do `pytest` em `pyproject.toml` foi elevado de
+  `<9.0` para `<10.0`.
+- **gitleaks e hadolint são binários baixados no workflow** (não
+  pacotes Python), por isso não entram em `make security` — rode-os
+  manualmente se quiser reproduzir localmente (versões pinadas em
+  `.github/workflows/security.yml`).
+- **Lint de Dockerfile ainda não tem o que escanear.** Não existe
+  `Dockerfile` neste repositório até o momento (chega no RAG-072); o
+  job localiza `Dockerfile*` dinamicamente e passa sem erro quando não
+  encontra nenhum, para já estar pronto quando o RAG-072 adicionar os
+  arquivos.
+
 ## Domínio (RAG-010)
 
 `packages/domain` contém as regras de negócio puras do produto (sem

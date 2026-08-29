@@ -26,9 +26,17 @@ dependencies = [
 dev = [
     "ruff>=0.6,<1.0",
     "mypy>=1.10,<2.0",
-    "pytest>=8.0,<9.0",
+    "pytest>=9.0.3,<10.0",
     "pytest-cov>=5.0,<6.0",
     "pytest-asyncio>=0.23,<1.0",
+    # RAG-071 — segurança no CI: SAST, SCA e o validador do arquivo de
+    # exceções (security/exceptions.yml). Gitleaks e hadolint (secret
+    # scanning e lint de Dockerfile) são binários externos baixados
+    # diretamente no workflow, não pacotes Python.
+    "bandit>=1.9,<2.0",
+    "pip-audit>=2.9,<3.0",
+    "pyyaml>=6.0,<7.0",
+    "types-PyYAML>=6.0,<7.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -80,6 +88,10 @@ disallow_untyped_defs = false
 module = "asyncpg.*"
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = "scripts.*"
+disallow_untyped_defs = false
+
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
@@ -110,3 +122,11 @@ exclude_lines = [
     "pragma: no cover",
     "if __name__ == .__main__.:",
 ]
+
+[tool.bandit]
+# RAG-071 — SAST. `tests`, `migrations` e `.venv` ficam de fora: código
+# de teste e migrations geradas pelo Alembic não são superfície de
+# ataque relevante, e `.venv` é dependência de terceiros já coberta
+# pelo SCA (pip-audit).
+exclude_dirs = ["tests", "migrations", ".venv"]
+
