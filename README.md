@@ -692,3 +692,63 @@ conteúdo), um `content_type` desconhecido e um DOCX corrompido
 (`DocumentParsingError`, não `UnsupportedDocumentFormatError` —
 distinção que o critério de aceite "erro de parsing é categorizado"
 exige).
+
+## Normalização e chunking (RAG-024)
+
+Implementa os passos 9-10 do fluxo de indexação (seção 11 do plano):
+normalizar o texto extraído (RAG-023) sem perder estrutura semântica e
+dividi-lo em chunks determinísticos, seguindo os defaults da seção
+11.1 (tamanho 500 tokens, sobreposição 75, mínimo 50). Embeddings e
+persistência (passos 11-14) continuam sem implementação — RAG-025 a
+RAG-027.
+
+`packages/ingestion/chunking.py::chunk_document(markdown, *, title,
+origin, config=None)` é a função pura: recebe o Markdown de UM
+documento e devolve uma lista de `ChunkDraft` (um chunk ainda sem
+`id`/`tenant_id`/`knowledge_base_id`/`version_id`/`embedding` — esses
+campos só existem quando RAG-026 persiste o `Chunk` de domínio a
+partir de um `ChunkDraft`). A assinatura só aceita um documento por
+chamada — "não mistura documentos" é garantido estruturalmente, não
+por convenção.
+
+- **Seções e parágrafos**: o texto é dividido em blocos por título
+  Markdown e por parágrafo; blocos da mesma seção são empacotados
+  gulosamente até `chunk_size` tokens. Um chunk nunca combina blocos de
+  seções diferentes — cada chunk tem exatamente uma seção de origem
+  (`ChunkDraft.section`), o que preserva "seção" sem ambiguidade. Um
+  parágrafo isolado maior que `chunk_size` é dividido por tokens
+  diretamente (o fallback do passo 10), com sobreposição entre os
+  pedaços. Um chunk normal pode terminar um pouco acima de
+  `chunk_size` para acomodar um parágrafo inteiro — só o fallback por
+  tokens respeita o limite à risca, porque não há mais parágrafo para
+  preservar nesse caso.
+- **Mínimo**: se o último chunk de uma seção fica abaixo de
+  `min_chunk_size`, é fundido no chunk anterior da mesma seção (nunca
+  cruza seção, nunca descarta conteúdo). A fusão remove a sobreposição
+  já duplicada no início do chunk fundido antes de concatenar — sem
+  isso, o trecho de sobreposição apareceria duas vezes.
+- **Página**: nenhum formato suportado hoje pelo RAG-023 (Markdown,
+  texto puro, DOCX) tem noção de página no Docling — `ChunkDraft.page`
+  é sempre `None` na prática atual. O campo existe e é propagado de
+  ponta a ponta para quando a extração de PDF paginada existir.
+- **Configurável por base**: `ChunkingConfig.from_knowledge_base_config(kb.config)`
+  lê `chunk_size`/`chunk_overlap`/`min_chunk_size` de `KnowledgeBase.config`
+  (RAG-010), com os defaults da seção 11.1 para o que faltar —
+  `InvalidChunkingConfigError` rejeita combinações inconsistentes
+  (`chunk_overlap >= chunk_size`, `min_chunk_size > chunk_size`, etc.).
+- **Contagem de tokens**: não usamos um tokenizer real (`tiktoken`) —
+  ele baixa o vocabulário BPE em runtime na primeira chamada
+  (`openaipublic.blob.core.windows.net`), o mesmo problema de egress já
+  documentado para o modelo de layout do Docling (RAG-023).
+  `_count_tokens` aproxima com uma contagem de palavras/pontuação via
+  regex — determinística, sem download. É uma aproximação aceitável
+  para chunking (o que importa é um tamanho consistente), mas vale
+  reavaliar antes de reusar esse número para orçamento de contexto de
+  geração (RAG-041) ou limites de lote de embeddings (RAG-025).
+
+Testes: `tests/unit/test_chunking.py` cobre os critérios de aceite —
+documento vazio, seções nunca misturadas, página sempre `None` hoje,
+determinismo, validação de `ChunkingConfig`, `from_knowledge_base_config`,
+o fallback por tokens (com verificação de sobreposição exata entre
+pedaços consecutivos) e a fusão por mínimo sem duplicar a sobreposição
+(inclusive com `chunk_overlap=0`).
