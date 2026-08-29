@@ -9,6 +9,7 @@ from fastapi import FastAPI
 
 from apps.api.errors import register_error_handlers
 from apps.api.routers import documents, health, jobs, knowledge_bases
+from packages.observability.tracing import configure_tracing, instrument_fastapi_app
 
 
 def create_app() -> FastAPI:
@@ -24,6 +25,12 @@ def create_app() -> FastAPI:
     app.include_router(knowledge_bases.router)
     app.include_router(documents.router)
     app.include_router(jobs.router)
+    # RAG-052 — seguro chamar aqui (sem Settings, ver
+    # packages/observability/tracing.py): não quebra os testes que
+    # importam esta app sem nenhuma variável de ambiente de negócio
+    # configurada.
+    configure_tracing(service_name="rag-platform-api")
+    instrument_fastapi_app(app)
     return app
 
 

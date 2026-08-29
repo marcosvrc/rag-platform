@@ -1037,3 +1037,64 @@ nunca propaga); `tests/unit/test_schema.py` cobre o formato da tabela
 classe `TestAuditLog` provando que a ação HTTP correspondente
 registrou exatamente um evento com o ator/tenant/ação/recurso
 esperados.
+## Tracing distribuído (RAG-052)
+
+Instrumenta a API e o worker de indexação com OpenTelemetry, cobrindo
+o fluxo upload -> indexação de ponta a ponta (a API publica o
+`IndexJob` no Celery, o worker consome) e, automaticamente, qualquer
+fluxo futuro (ex.: `/v1/query`, RAG-044): a instrumentação é aplicada
+uma vez, no nível da app FastAPI e da app Celery compartilhada, nunca
+por rota ou por task — nada precisa mudar quando novos endpoints ou
+tasks forem adicionados.
+
+`packages/observability/tracing.py` concentra toda a configuração.
+Decisão deliberada: ela lê variáveis `OTEL_*` diretamente
+(`os.getenv`), não via `packages.config.settings.Settings` — a
+primeira, porque `configure_tracing()` roda dentro de
+`create_app()` (`apps/api/main.py`), e esse módulo nunca chama
+`get_settings()` (vários testes importam a app sem nenhuma variável
+de ambiente de negócio configurada, incluindo um teste que existe
+justamente para provar que a liveness independe de configuração); a
+segunda, porque `OTEL_EXPORTER_OTLP_*` já seguem a especificação
+padrão do OpenTelemetry, e o próprio `OTLPSpanExporter()` já as lê
+sozinho — reimplementar isso via `Settings` só duplicaria lógica do
+SDK. `OTEL_TRACES_ENABLED` (não é uma variável do OpenTelemetry) é o
+único interruptor nosso: default `false` — sem ele, a instrumentação
+continua ativa, mas contra o tracer no-op padrão do OpenTelemetry
+(nenhum `TracerProvider` real): zero overhead, zero thread em
+background, zero chamada de rede, o que é o que mantém os testes
+unitários passando sem nenhum Collector real no ar (seção 1 do
+plano). `docker-compose.yml`/`.env.example` já ligam essa variável
+para desenvolvimento local — como o `run-api`/`run-worker` do
+Makefile rodam no host (RAG-003), essas variáveis só chegam ao
+processo se estiverem no ambiente real do shell, não só em `.env`
+(Pydantic Settings lê `.env` diretamente; um `os.getenv` puro não);
+por isso os dois alvos agora fazem `set -a; . ./.env; set +a` antes
+de subir o processo.
+
+Três instrumentações, cada uma sem captura de conteúdo sensível:
+- **FastAPI** (`instrument_fastapi_app`): só método HTTP, rota e
+  status code — nunca corpo da requisição/resposta.
+- **SQLAlchemy** (`instrument_sqlalchemy_engine`, chamado em
+  `adapters/postgres/engine.py:get_engine`, uma vez por instância de
+  engine — não globalmente, porque testes recriam o engine cacheado
+  via `get_engine.cache_clear()`): `db.statement` é o SQL
+  parametrizado (bind parameters), nunca o valor literal.
+- **Celery** (`CeleryInstrumentor`, instrumentado tanto no processo
+  da API quanto no do worker — é o que propaga o contexto de trace
+  através da mensagem do broker Redis, correlacionando o span do
+  upload com o da task de indexação): só nome da task e ID do job —
+  nunca `args`/`kwargs`. Nenhuma task atual recebe texto de documento
+  como argumento de qualquer forma (`process_index_job_task` só
+  recebe um UUID).
+
+Testes (`tests/unit/test_tracing.py`) dublam os três limites com
+efeito colateral real (exportador, processor, provider, os dois
+instrumentors de terceiros) e verificam só a lógica deste módulo:
+liga/desliga por `OTEL_TRACES_ENABLED`, idempotência da instrumentação
+do Celery entre chamadas, o override por `OTEL_SERVICE_NAME`, e que
+`instrument_fastapi_app`/`instrument_sqlalchemy_engine` delegam para
+os instrumentors corretos. Validar exportação de verdade (traces
+chegando no Collector, correlacionados entre API e worker) fica para
+verificação manual via `docker compose up` — nenhum teste de pull
+request sobe infraestrutura real (seção 1 do plano).
