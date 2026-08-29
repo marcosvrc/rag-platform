@@ -1,8 +1,9 @@
-"""Fake em memória de `DocumentRepositoryPort`, para testes (RAG-021).
+"""Fake em memória de `DocumentRepositoryPort`, para testes
+(RAG-021/RAG-022).
 
 Espelha as mesmas regras do adapter Postgres (duplicidade por checksum,
-idempotência por `Idempotency-Key`, isolamento por tenant) sem precisar
-de um banco real — mesmo padrão de
+idempotência por `Idempotency-Key`, isolamento por tenant, ciclo de
+vida do `IndexJob`) sem precisar de um banco real — mesmo padrão de
 `adapters/knowledge_base_repository/in_memory.py` (RAG-012).
 """
 
@@ -105,3 +106,39 @@ class InMemoryDocumentRepository(DocumentRepositoryPort):
         if idempotency_key is not None:
             self._idempotency_keys[(tenant_id, knowledge_base_id, idempotency_key)] = upload
         return upload
+
+    async def claim_index_job(self, *, index_job_id: UUID) -> IndexJob | None:
+        job = self._jobs.get(index_job_id)
+        if job is None or job.status != ProcessingStatus.PENDING:
+            return None
+        claimed = job.model_copy(
+            update={"status": ProcessingStatus.RUNNING, "updated_at": datetime.now(UTC)}
+        )
+        self._jobs[index_job_id] = claimed
+        return claimed
+
+    async def mark_index_job_succeeded(self, *, index_job_id: UUID) -> None:
+        job = self._jobs[index_job_id]
+        self._jobs[index_job_id] = job.model_copy(
+            update={"status": ProcessingStatus.SUCCEEDED, "updated_at": datetime.now(UTC)}
+        )
+
+    async def mark_index_job_failed(
+        self,
+        *,
+        index_job_id: UUID,
+        attempts: int,
+        error_code: str,
+        error_message: str,
+        final: bool,
+    ) -> None:
+        job = self._jobs[index_job_id]
+        self._jobs[index_job_id] = job.model_copy(
+            update={
+                "status": ProcessingStatus.FAILED if final else ProcessingStatus.RUNNING,
+                "attempts": attempts,
+                "error_code": error_code,
+                "error_message": error_message,
+                "updated_at": datetime.now(UTC),
+            }
+        )

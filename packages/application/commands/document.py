@@ -1,11 +1,11 @@
-"""Comando de upload de documentos (RAG-021, seção 11 do plano).
+"""Comando de upload de documentos (RAG-021/RAG-022, seção 11 do plano).
 
-Implementa os passos 1-5 do fluxo de indexação (validar, calcular
+Implementa os passos 1-6 do fluxo de indexação: validar, calcular
 checksum, detectar duplicidade, armazenar arquivo, criar documento +
-versão + job). O passo 6 (publicar o job numa fila) é RAG-022 — aqui o
-job só é persistido com `status=PENDING`; nada além disso é assumido
-sobre como/quando ele será processado.
-"""
+versão + job (RAG-021), e publicar o job na fila (RAG-022) — só quando
+algo novo foi de fato criado (`not upload.replayed`); uma repetição
+idempotente não publica de novo, já que o job original já está (ou já
+foi) na fila."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from packages.application.ports.document_repository import (
     DocumentUpload,
     IdempotencyKeyConflictError,
 )
+from packages.application.ports.job_queue import JobQueuePort
 from packages.application.ports.knowledge_base_repository import KnowledgeBaseRepositoryPort
 from packages.application.ports.object_storage import ObjectStoragePort, sanitize_object_key
 
@@ -79,6 +80,7 @@ async def upload_document(
     document_repository: DocumentRepositoryPort,
     knowledge_base_repository: KnowledgeBaseRepositoryPort,
     object_storage: ObjectStoragePort,
+    job_queue: JobQueuePort,
     *,
     tenant_id: UUID,
     knowledge_base_id: UUID,
@@ -136,7 +138,7 @@ async def upload_document(
     stored = await object_storage.upload(key=object_key, content=content, content_type=content_type)
 
     try:
-        return await document_repository.create_document(
+        upload = await document_repository.create_document(
             tenant_id=tenant_id,
             knowledge_base_id=knowledge_base_id,
             name=filename,
@@ -149,3 +151,7 @@ async def upload_document(
         raise ConflictError(detail=str(exc)) from exc
     except IdempotencyKeyConflictError as exc:
         raise ConflictError(detail=str(exc)) from exc
+
+    if not upload.replayed:
+        job_queue.enqueue_index_job(index_job_id=upload.index_job.id)
+    return upload
