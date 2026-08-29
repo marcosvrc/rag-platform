@@ -20,9 +20,15 @@ from adapters.document_repository import PostgresDocumentRepository
 from adapters.object_storage.s3_object_storage import S3ObjectStorage
 from adapters.postgres.engine import get_session
 from adapters.queue.celery_job_queue import CeleryJobQueue
-from apps.api.dependencies import get_current_tenant_id, get_settings_dependency
+from apps.api.dependencies import (
+    get_audit_log,
+    get_current_identity,
+    get_current_tenant_id,
+    get_settings_dependency,
+)
 from apps.api.routers.knowledge_bases import get_knowledge_base_repository
 from packages.application.commands import document as document_commands
+from packages.application.ports.audit_log import AuditLogPort, record_audit_event_safely
 from packages.application.ports.document_repository import (
     DocumentRepositoryPort,
     DocumentUpload,
@@ -31,6 +37,7 @@ from packages.application.ports.document_repository import (
 from packages.application.ports.job_queue import JobQueuePort
 from packages.application.ports.knowledge_base_repository import KnowledgeBaseRepositoryPort
 from packages.application.ports.object_storage import ObjectStoragePort
+from packages.application.ports.token_verifier import TokenClaims
 from packages.config.settings import Settings
 from packages.contracts.document import DocumentUploadResponse, ReindexResponse
 
@@ -100,11 +107,13 @@ async def upload_document(
     file: UploadFile = File(...),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     tenant_id: UUID = Depends(get_current_tenant_id),
+    identity: TokenClaims = Depends(get_current_identity),
     settings: Settings = Depends(get_settings_dependency),
     document_repository: DocumentRepositoryPort = Depends(get_document_repository),
     knowledge_base_repository: KnowledgeBaseRepositoryPort = Depends(get_knowledge_base_repository),
     object_storage: ObjectStoragePort = Depends(get_object_storage),
     job_queue: JobQueuePort = Depends(get_job_queue),
+    audit_log: AuditLogPort = Depends(get_audit_log),
 ) -> DocumentUploadResponse:
     content = await file.read()
     upload = await document_commands.upload_document(
@@ -120,6 +129,14 @@ async def upload_document(
         max_size_bytes=settings.document_max_size_bytes,
         idempotency_key=idempotency_key,
     )
+    await record_audit_event_safely(
+        audit_log,
+        tenant_id=tenant_id,
+        actor=identity.subject,
+        action="document.upload",
+        resource_type="document",
+        resource_id=upload.document.id,
+    )
     return _to_response(upload)
 
 
@@ -132,9 +149,11 @@ async def reindex_document(
     knowledge_base_id: UUID,
     document_id: UUID,
     tenant_id: UUID = Depends(get_current_tenant_id),
+    identity: TokenClaims = Depends(get_current_identity),
     document_repository: DocumentRepositoryPort = Depends(get_document_repository),
     knowledge_base_repository: KnowledgeBaseRepositoryPort = Depends(get_knowledge_base_repository),
     job_queue: JobQueuePort = Depends(get_job_queue),
+    audit_log: AuditLogPort = Depends(get_audit_log),
 ) -> ReindexResponse:
     result = await document_commands.reindex_document(
         document_repository,
@@ -143,6 +162,14 @@ async def reindex_document(
         tenant_id=tenant_id,
         knowledge_base_id=knowledge_base_id,
         document_id=document_id,
+    )
+    await record_audit_event_safely(
+        audit_log,
+        tenant_id=tenant_id,
+        actor=identity.subject,
+        action="document.reindex",
+        resource_type="document",
+        resource_id=document_id,
     )
     return _to_reindex_response(
         result, document_id=document_id, knowledge_base_id=knowledge_base_id

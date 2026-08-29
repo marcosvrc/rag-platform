@@ -33,6 +33,10 @@ TENANT_SCOPED_TABLES = {
     # migration 0003) mas carrega tenant_id direto, então a mesma
     # verificação de isolamento vale para ela.
     "document_idempotency_keys",
+    # audit_events (RAG-054, migration 0005): mesmo caso de
+    # document_idempotency_keys — infraestrutura de aplicação, não uma
+    # entidade de domínio, mas com tenant_id direto.
+    "audit_events",
 }
 
 
@@ -109,6 +113,10 @@ def test_foreign_keys_reference_the_expected_tables() -> None:
             "document_versions.id",
             "index_jobs.id",
         },
+        # audit_events.resource_id é polimórfico (aponta para
+        # knowledge_bases.id OU documents.id, dependendo de
+        # resource_type) — por isso não é FK, só tenant_id é.
+        "audit_events": {"tenants.id"},
     }
     for table_name, expected_targets in expected.items():
         table = Base.metadata.tables[table_name]
@@ -198,3 +206,20 @@ def test_chunks_content_tsv_has_a_gin_index() -> None:
     assert len(gin_indexes) == 1
     (gin_index,) = gin_indexes
     assert {col.name for col in gin_index.columns} == {"content_tsv"}
+
+
+def test_audit_events_required_columns_are_not_nullable() -> None:
+    """RAG-054 (migration 0005): ator, ação, tipo/id de recurso e
+    timestamp são sempre obrigatórios — um evento de auditoria
+    incompleto não é um evento de auditoria válido."""
+    audit_events = Base.metadata.tables["audit_events"]
+    for column_name in ("actor", "action", "resource_type", "resource_id", "occurred_at"):
+        assert not audit_events.columns[column_name].nullable, column_name
+
+
+def test_audit_events_resource_id_is_not_a_foreign_key() -> None:
+    """resource_id é polimórfico (RAG-054): aponta para
+    knowledge_bases.id OU documents.id dependendo de resource_type, e
+    uma FK exigiria uma única tabela de destino."""
+    audit_events = Base.metadata.tables["audit_events"]
+    assert not audit_events.columns["resource_id"].foreign_keys

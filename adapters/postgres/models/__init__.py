@@ -11,6 +11,7 @@ da seção 5.1 do plano que proíbe o domínio de importar SQLAlchemy/
 pgvector diretamente é o motivo de eles existirem aqui, em `adapters/`.
 """
 
+from adapters.postgres.models.audit_event import AuditEventModel
 from adapters.postgres.models.chunk import ChunkModel
 from adapters.postgres.models.document import DocumentModel
 from adapters.postgres.models.document_idempotency_key import DocumentIdempotencyKeyModel
@@ -24,6 +25,7 @@ from adapters.postgres.models.query_log import QueryLogModel
 from adapters.postgres.models.tenant import TenantModel
 
 __all__ = [
+    "AuditEventModel",
     "ChunkModel",
     "DocumentIdempotencyKeyModel",
     "DocumentModel",

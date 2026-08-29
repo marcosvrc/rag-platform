@@ -24,9 +24,10 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
+from adapters.audit_log.in_memory import InMemoryAuditLog
 from adapters.knowledge_base_repository.in_memory import InMemoryKnowledgeBaseRepository
 from apps.api import main
-from apps.api.dependencies import get_settings_dependency
+from apps.api.dependencies import get_audit_log, get_settings_dependency
 from apps.api.errors import PROBLEM_JSON_MEDIA_TYPE
 from apps.api.routers.knowledge_bases import get_knowledge_base_repository
 from packages.config.settings import Settings
@@ -72,8 +73,16 @@ def repository() -> InMemoryKnowledgeBaseRepository:
 
 
 @pytest.fixture
-def client(repository: InMemoryKnowledgeBaseRepository) -> Iterator[TestClient]:
+def audit_log() -> InMemoryAuditLog:
+    return InMemoryAuditLog()
+
+
+@pytest.fixture
+def client(
+    repository: InMemoryKnowledgeBaseRepository, audit_log: InMemoryAuditLog
+) -> Iterator[TestClient]:
     main.app.dependency_overrides[get_knowledge_base_repository] = lambda: repository
+    main.app.dependency_overrides[get_audit_log] = lambda: audit_log
     main.app.dependency_overrides[get_settings_dependency] = lambda: _test_settings()
     try:
         yield TestClient(main.app)
@@ -308,3 +317,55 @@ class TestTenantIsolation:
         assert response_a.status_code == 201
         assert response_b.status_code == 201
         assert response_a.json()["id"] != response_b.json()["id"]
+
+
+class TestAuditLog:
+    """RAG-054: criar/atualizar/excluir base de conhecimento registra
+    um evento de auditoria com ator, tenant, ação e recurso corretos."""
+
+    def test_create_records_an_audit_event(
+        self, client: TestClient, audit_log: InMemoryAuditLog
+    ) -> None:
+        created = client.post(
+            "/v1/knowledge-bases", json={"name": "Manuais"}, headers=_headers()
+        ).json()
+
+        assert len(audit_log.events) == 1
+        event = audit_log.events[0]
+        assert event.action == "knowledge_base.create"
+        assert event.resource_type == "knowledge_base"
+        assert str(event.resource_id) == created["id"]
+        assert event.actor == "test-user"
+        assert str(event.tenant_id) == TENANT_A
+
+    def test_update_records_an_audit_event(
+        self, client: TestClient, audit_log: InMemoryAuditLog
+    ) -> None:
+        created = client.post(
+            "/v1/knowledge-bases", json={"name": "Manuais"}, headers=_headers()
+        ).json()
+        audit_log.events.clear()
+
+        client.patch(
+            f"/v1/knowledge-bases/{created['id']}",
+            json={"description": "nova"},
+            headers=_headers(),
+        )
+
+        assert len(audit_log.events) == 1
+        assert audit_log.events[0].action == "knowledge_base.update"
+        assert str(audit_log.events[0].resource_id) == created["id"]
+
+    def test_delete_records_an_audit_event(
+        self, client: TestClient, audit_log: InMemoryAuditLog
+    ) -> None:
+        created = client.post(
+            "/v1/knowledge-bases", json={"name": "Manuais"}, headers=_headers()
+        ).json()
+        audit_log.events.clear()
+
+        client.delete(f"/v1/knowledge-bases/{created['id']}", headers=_headers())
+
+        assert len(audit_log.events) == 1
+        assert audit_log.events[0].action == "knowledge_base.delete"
+        assert str(audit_log.events[0].resource_id) == created["id"]
