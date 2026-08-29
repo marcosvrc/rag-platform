@@ -21,6 +21,8 @@ Concluído até o momento:
   + extensão pgvector).
 - **RAG-005 — Criar API base e health checks** (FastAPI, `/health/live`,
   `/health/ready`).
+- **RAG-070 — Workflow inicial de pull request** (GitHub Actions: lint,
+  typecheck, testes, migrations e validação do OpenAPI).
 - **RAG-010 — Modelar entidades e estados** (entidades de domínio,
   máquina de estados de `Document`).
 
@@ -107,6 +109,31 @@ processo está no ar, para não ser derrubado por uma falha temporária de
 uma dependência (isso é papel do `/health/ready`). Endpoints de negócio
 (`/v1/...`) chegam a partir de RAG-012.
 
+## CI (RAG-070)
+
+Toda pull request contra `master` roda `.github/workflows/pull-request.yml`,
+com quatro jobs independentes (rodam em paralelo):
+
+| Job | Equivalente local | O que valida |
+| --- | --- | --- |
+| Lint (Ruff) | `make lint` | formatação e regras de lint |
+| Typecheck (Mypy) | `make typecheck` | tipagem estática |
+| Testes unitários e OpenAPI | `make test` + `app.openapi()` | testes, cobertura >= 85%, schema OpenAPI válido |
+| Validar migrations | `alembic upgrade head --sql` | grafo de revisões do Alembic, sem precisar de um banco real |
+
+Os artefatos de teste (`pytest-report.xml`, `coverage.xml`) são publicados
+no job de testes mesmo quando ele falha, para facilitar o diagnóstico.
+
+**Importante — configuração manual pendente:** o workflow por si só não
+bloqueia merge; isso depende de uma *branch protection rule* no GitHub
+(Settings -> Branches -> Add rule para `master` -> "Require status checks
+to pass before merging", marcando os quatro jobs acima). Esse passo
+precisa ser feito por quem tem permissão de administrar o repositório.
+
+Escopo desta atividade (RAG-070): apenas o workflow de PR. Secret
+scanning/SAST/SCA (RAG-071), build e publicação de imagens no GHCR
+(RAG-072) e o quality gate de avaliação RAG (RAG-073) ficam para
+atividades seguintes, como o backlog já prevê.
 ## Domínio (RAG-010)
 
 `packages/domain` contém as regras de negócio puras do produto (sem
