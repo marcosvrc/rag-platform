@@ -89,26 +89,29 @@ def test_get_session_factory_is_bound_to_the_cached_engine(configured_env: None)
 def test_migrations_have_a_single_well_formed_head() -> None:
     """Valida a árvore de revisões do Alembic offline (sem conectar a
     nenhum banco): garante que existe uma única head, alcançável a
-    partir da base, e que ela é a migration 0005 (audit_events,
-    RAG-054), encadeada corretamente depois da 0004 (índice de busca
-    lexical, RAG-031), da 0003 (document_idempotency_keys, RAG-021),
-    da 0002 (schema inicial, RAG-011) e da 0001 (pgvector)."""
+    partir da base, e que ela é a migration 0006 (dimensão fixa do
+    embedding + índice HNSW, RAG-030), encadeada corretamente depois da
+    0005 (audit_events, RAG-054), da 0004 (índice de busca lexical,
+    RAG-031), da 0003 (document_idempotency_keys, RAG-021), da 0002
+    (schema inicial, RAG-011) e da 0001 (pgvector)."""
     config = Config(str(REPO_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
     script = ScriptDirectory.from_config(config)
 
     heads = script.get_heads()
-    assert heads == ["0005"]
+    assert heads == ["0006"]
 
     revisions = list(script.walk_revisions())
-    assert [r.revision for r in revisions] == ["0005", "0004", "0003", "0002", "0001"]
-    assert revisions[0].down_revision == "0004"
-    assert revisions[1].down_revision == "0003"
-    assert revisions[2].down_revision == "0002"
-    assert revisions[3].down_revision == "0001"
-    assert revisions[4].down_revision is None
-    assert "audit_events" in (revisions[0].doc or "")
-    assert "lexical search" in (revisions[1].doc or "")
-    assert "document_idempotency_keys" in (revisions[2].doc or "")
-    assert "core schema" in (revisions[3].doc or "")
-    assert "pgvector" in (revisions[4].doc or "")
+    assert [r.revision for r in revisions] == ["0006", "0005", "0004", "0003", "0002", "0001"]
+    assert revisions[0].down_revision == "0005"
+    assert revisions[1].down_revision == "0004"
+    assert revisions[2].down_revision == "0003"
+    assert revisions[3].down_revision == "0002"
+    assert revisions[4].down_revision == "0001"
+    assert revisions[5].down_revision is None
+    assert "embedding dimension" in (revisions[0].doc or "")
+    assert "audit_events" in (revisions[1].doc or "")
+    assert "lexical search" in (revisions[2].doc or "")
+    assert "document_idempotency_keys" in (revisions[3].doc or "")
+    assert "core schema" in (revisions[4].doc or "")
+    assert "pgvector" in (revisions[5].doc or "")

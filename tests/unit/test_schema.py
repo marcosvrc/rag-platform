@@ -176,15 +176,36 @@ def test_check_constraints_enforce_non_negative_and_positive_invariants() -> Non
             )
 
 
-def test_chunk_embedding_column_has_no_fixed_dimension_yet() -> None:
-    """Decisão registrada em RAG-011: a dimensão do embedding depende do
-    modelo/alias escolhido em RAG-025, então a coluna fica sem dimensão
-    fixa por enquanto (e, por isso, sem índice ANN — isso é RAG-030)."""
+def test_chunk_embedding_column_has_a_fixed_dimension() -> None:
+    """RAG-030 (migration 0006): a dimensão foi fixada em 1.024 —
+    dimensão nativa do modelo escolhido, Qwen3-Embedding-0.6B
+    (self-hospedado via Ollama, atrás do gateway LiteLLM). Um índice
+    ANN (abaixo) não pode existir sem uma dimensão fixa."""
     chunks = Base.metadata.tables["chunks"]
     embedding_type = chunks.columns["embedding"].type
 
     assert isinstance(embedding_type, Vector)
-    assert embedding_type.dim is None
+    assert embedding_type.dim == 1024
+
+
+def test_chunks_embedding_has_an_hnsw_index() -> None:
+    """RAG-030 (migration 0006): índice HNSW com `vector_cosine_ops` —
+    a mesma métrica (distância de cosseno) que
+    `adapters/vector_search/postgres.py` usa via `cosine_distance` —
+    para que a busca vetorial use o índice em vez de fazer table scan
+    (critério de aceite "usa índice pgvector")."""
+    chunks = Base.metadata.tables["chunks"]
+
+    hnsw_indexes = [
+        index
+        for index in chunks.indexes
+        if index.name == "ix_chunks_embedding_hnsw_cosine"
+        and index.dialect_options["postgresql"]["using"] == "hnsw"
+    ]
+    assert len(hnsw_indexes) == 1
+    (hnsw_index,) = hnsw_indexes
+    assert {col.name for col in hnsw_index.columns} == {"embedding"}
+    assert hnsw_index.dialect_options["postgresql"]["ops"] == {"embedding": "vector_cosine_ops"}
 
 
 def test_chunks_content_tsv_has_a_gin_index() -> None:

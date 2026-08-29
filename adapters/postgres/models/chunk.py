@@ -2,18 +2,20 @@
 
 `embedding` usa o tipo `vector` do pgvector (pacote `pgvector`, biblioteca
 de infraestrutura — por isso vive em `adapters/`, nunca em
-`packages/domain`, ver seção 5.1 do plano) **sem dimensão fixa**: o
-modelo/alias de embeddings ainda não foi escolhido (isso é RAG-025 —
-que deliberadamente não provisionou um gateway real, ver
-`adapters/litellm/embedding_provider.py`), e um índice ANN (ivfflat/
-hnsw) exige uma dimensão fixa para existir — isso continua sendo
-RAG-030, ainda bloqueado por essa mesma decisão de produto pendente.
+`packages/domain`, ver seção 5.1 do plano) com dimensão fixa 1.024 desde
+a migration 0006 (RAG-030): o modelo escolhido foi o Qwen3-Embedding-0.6B
+(self-hospedado via Ollama, atrás do gateway LiteLLM — RAG-025, decisão
+de produto do RAG-030), cuja dimensão nativa já é 1.024. O índice ANN
+(HNSW, `vector_cosine_ops`) também é criado na migration 0006, junto com
+a dimensão — um índice ANN não pode existir sem uma dimensão fixa.
 
 `content_tsv` (RAG-031, migration 0004) é uma coluna GERADA pelo
 Postgres (`GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED`)
 com um índice GIN — nunca escrita pela aplicação (SQLAlchemy trata
 `Computed(...)` como somente leitura); ver
-`adapters/lexical_search/postgres.py` para a busca que usa esse índice.
+`adapters/lexical_search/postgres.py` para a busca que usa esse índice,
+e `adapters/vector_search/postgres.py` para a busca vetorial equivalente
+sobre `embedding`.
 """
 
 from typing import Any
@@ -38,6 +40,15 @@ class ChunkModel(Base):
         Index("ix_chunks_version_id", "version_id"),
         # RAG-031: índice GIN sobre `content_tsv` para busca lexical.
         Index("ix_chunks_content_tsv", "content_tsv", postgresql_using="gin"),
+        # RAG-030: índice HNSW (mesma métrica de cosseno usada por
+        # `adapters/vector_search/postgres.py` via `cosine_distance`)
+        # sobre `embedding` para busca vetorial.
+        Index(
+            "ix_chunks_embedding_hnsw_cosine",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
         CheckConstraint("token_count >= 1", name="token_count_positive"),
         CheckConstraint("page IS NULL OR page >= 1", name="page_positive"),
     )
@@ -67,7 +78,7 @@ class ChunkModel(Base):
     metadata_: Mapped[dict[str, Any]] = mapped_column(
         "metadata", JSONB, nullable=False, server_default="{}"
     )
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(), nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(1024), nullable=True)
     content_tsv: Mapped[str | None] = mapped_column(
         TSVECTOR, Computed("to_tsvector('simple', content)", persisted=True), nullable=True
     )

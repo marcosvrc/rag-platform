@@ -781,15 +781,17 @@ transitório). Lotes de até `litellm_embedding_batch_size` textos por
 requisição (default 100); a resposta é reordenada pelo campo `index`
 de cada item, nunca assumindo que o gateway devolve na ordem enviada.
 
-**O que fica de fora desta atividade, propositalmente**: nenhum proxy
-LiteLLM real é provisionado (`docker-compose.yml` não ganhou um serviço
-novo) — isso exigiria escolher e configurar credenciais de um provedor
-de embeddings de verdade, o que não existia em lugar nenhum do
-`.env.example` até agora. É uma decisão de produto (qual provedor, que
-chave usar) que ficou para o usuário decidir explicitamente, não algo
-para assumir sozinho. `Settings.litellm_base_url` já aponta para onde
-o gateway deveria estar (`http://localhost:4000`, a porta padrão do
-proxy LiteLLM) para quando isso for provisionado.
+**O que ficou de fora desta atividade, propositalmente**: nenhum proxy
+LiteLLM real foi provisionado nesta atividade (`docker-compose.yml` não
+ganhou um serviço novo) — isso exigiria escolher e configurar
+credenciais de um provedor de embeddings de verdade, o que não existia
+em lugar nenhum do `.env.example` até então. Era uma decisão de produto
+(qual provedor, que modelo) que ficou para o usuário decidir
+explicitamente, não algo para assumir sozinho. `Settings.litellm_base_url`
+já apontava para onde o gateway deveria estar (`http://localhost:4000`,
+a porta padrão do proxy LiteLLM) para quando isso fosse provisionado —
+o que aconteceu no RAG-030 (ver seção abaixo), quando essa decisão foi
+tomada.
 
 **Alias versionado**: `config/models/embedding.v1.yaml` (carregado por
 `packages/config/models.py::get_default_embedding_model()`, mesma
@@ -931,13 +933,14 @@ HTTP dos dois endpoints (200/202/401/404/409).
 ## Busca lexical (RAG-031)
 
 Implementa a recuperação de chunks por PostgreSQL Full Text Search —
-o objetivo do épico E3 que não depende de nenhuma decisão de produto
-ainda pendente (ao contrário do RAG-030, busca vetorial: continua
+o objetivo do épico E3 que não dependia de nenhuma decisão de produto
+pendente (ao contrário do RAG-030, busca vetorial: na época, continuava
 bloqueada porque o modelo/alias real de embeddings, e portanto sua
-dimensão, ainda não foi escolhido por trás do gateway LiteLLM — decisão
-deliberadamente adiada no RAG-025 — e um índice ANN pgvector exige
-dimensão fixa. RAG-031 não tem essa dependência, por isso foi
-implementada primeiro).
+dimensão, ainda não tinha sido escolhido por trás do gateway LiteLLM —
+decisão deliberadamente adiada no RAG-025 — e um índice ANN pgvector
+exige dimensão fixa. RAG-031 não tinha essa dependência, por isso foi
+implementada primeiro; RAG-030 resolveu essa decisão depois — ver seção
+abaixo).
 
 Migration 0004 adiciona `chunks.content_tsv`, uma coluna GERADA pelo
 Postgres (`GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED`,
@@ -1098,3 +1101,75 @@ os instrumentors corretos. Validar exportação de verdade (traces
 chegando no Collector, correlacionados entre API e worker) fica para
 verificação manual via `docker compose up` — nenhum teste de pull
 request sobe infraestrutura real (seção 1 do plano).
+
+## Busca vetorial e provisionamento do gateway de embeddings (RAG-030)
+
+Destrava a decisão de produto deixada propositalmente em aberto no
+RAG-025/RAG-011 (ver seções acima): qual modelo de embeddings vive por
+trás do alias `embedding-model-alias`, e portanto qual dimensão fixar
+em `chunks.embedding` para poder criar um índice ANN. Decisão tomada:
+**Qwen3-Embedding-0.6B**, self-hospedado via **Ollama**, dimensão
+nativa **1.024** — abordagem open source, sem depender de um provedor
+pago de embeddings.
+
+**Por que Ollama, e não Text Embeddings Inference (TEI)**: TEI é a
+opção "padrão" da Hugging Face para servir modelos de embedding, mas
+tem um histórico documentado de falhas rodando o Qwen3-Embedding-0.6B
+especificamente em CPU (crash por falta de export ONNX do modelo e
+erros de Intel MKL — `huggingface/text-embeddings-inference#667`).
+Ollama usa `llama.cpp` (formato GGUF) como motor de inferência, maduro
+e primariamente desenhado para CPU, evitando essa classe de problema.
+
+**Migration 0006** corrige `chunks.embedding` (criada sem dimensão em
+0002 — RAG-011) para `vector(1024)` via `ALTER COLUMN ... USING
+embedding::vector(1024)`, e cria o índice **HNSW** (`vector_cosine_ops`)
+— HNSW em vez de ivfflat porque não exige um passo de treino com dados
+já existentes (a tabela está vazia neste ponto) e é a recomendação
+atual do próprio pgvector para a maioria dos casos.
+
+`packages/application/ports/vector_search.py` define `VectorSearchPort`
+(`search(tenant_id, knowledge_base_id, query_embedding, limit) ->
+list[ScoredChunk]`) — reusa `ScoredChunk` de `lexical_search.py`
+(RAG-031), já pensado desde então para os dois tipos de busca.
+`adapters/vector_search/postgres.py` (`PostgresVectorSearch`) implementa
+via `ChunkModel.embedding.cosine_distance(...)`, compilado pelo
+SQLAlchemy para o operador `<=>` que o planner do Postgres casa com o
+índice HNSW. Mesmos três critérios de aceite de RAG-031, pelo mesmo
+padrão (filtros no `WHERE`, join até `documents.active_version_id`
+para só a versão ativa, `ORDER BY` com `chunks.id` como desempate
+determinístico) — com um filtro adicional, `embedding IS NOT NULL`
+(um chunk cuja indexação ainda não gerou embedding nunca aparece num
+resultado). O score devolvido é similaridade de cosseno (`1 -
+distância`), não a distância bruta, para manter a mesma convenção
+"maior é melhor" da busca lexical — RAG-032 (fusão RRF) é quem vai
+combinar os dois rankings.
+
+`adapters/vector_search/in_memory.py` (`InMemoryVectorSearch`) é um
+fake para testar só o contrato da porta, mesmo papel do fake lexical —
+calcula similaridade de cosseno em Python puro (sem numpy).
+
+**Infraestrutura local** (`docker-compose.yml`): dois serviços novos.
+`ollama` serve o modelo (porta `11434`); `ollama-pull-embedding-model`
+roda uma vez, baixa `qwen3-embedding:0.6b` (~640MB) no volume
+`ollama_data` e termina — subidas seguintes reaproveitam o modelo já
+local. `litellm` (o proxy real, finalmente provisionado — RAG-025)
+usa `config/litellm/config.yaml` para mapear o alias
+`embedding-model-alias` para `ollama/qwen3-embedding:0.6b`; só sobe
+depois que o pull termina com sucesso. Trocar de modelo no futuro é
+editar esse `config.yaml` (e rodar `ollama pull` do novo modelo) —
+nunca `config/models/embedding.v1.yaml`, cujo alias é estável (seção 8
+do plano); uma mudança que exija um alias novo (dimensão diferente)
+cria `embedding.v2.yaml`.
+
+Testes: `tests/unit/test_vector_search_in_memory.py` cobre o contrato
+da porta (ranking por similaridade, desempate determinístico, filtro
+por tenant/base, `limit`, chunk sem embedding é ignorado,
+`query_embedding` vazio levanta `ValueError`).
+`tests/unit/test_schema.py` verifica a partir de `Base.metadata` (sem
+banco real, mesma abordagem do RAG-011/031) que `chunks.embedding` tem
+dimensão fixa 1.024 e que o índice HNSW existe com o operador
+`vector_cosine_ops` correto. "Usa índice pgvector" de fato (via
+`EXPLAIN` contra um Postgres real) e a integração ponta a ponta com
+Ollama/LiteLLM ficam para verificação manual via `docker compose up` e
+para `tests/integration/` quando essa suíte existir — mesma limitação
+já documentada para os demais adapters Postgres deste projeto.

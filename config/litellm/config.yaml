@@ -1,0 +1,16 @@
+# Configuração do proxy LiteLLM (RAG-025 define o cliente/adapter;
+# RAG-030 é quem decide e provisiona o modelo real por trás do alias).
+#
+# Mapeia `embedding-model-alias` (o mesmo alias publicado em
+# config/models/embedding.v1.yaml, resolvido pela aplicação via
+# adapters/litellm/embedding_provider.py) para o modelo real escolhido:
+# Qwen3-Embedding-0.6B, self-hospedado via Ollama (serviço `ollama` do
+# docker-compose.yml) por rodar bem em CPU sem exigir GPU — decisão de
+# produto do RAG-030. Trocar o modelo é editar só este arquivo (e
+# rodar `ollama pull` do novo modelo); nunca o embedding.v1.yaml, cujo
+# alias é estável (seção 8 do plano).
+model_list:
+  - model_name: embedding-model-alias
+    litellm_params:
+      model: ollama/qwen3-embedding:0.6b
+      api_base: http://ollama:11434
