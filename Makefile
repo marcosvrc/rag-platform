@@ -5,7 +5,7 @@ PYTHON ?= python3.12
 VENV := .venv
 BIN := $(VENV)/bin
 
-.PHONY: venv install lint format typecheck test security run-api check clean
+.PHONY: venv install lint format typecheck test security run-api run-worker check clean
 
 venv:
 	$(PYTHON) -m venv $(VENV)
@@ -36,8 +36,18 @@ security:
 	$(BIN)/pip-audit
 	$(BIN)/python scripts/check_security_exceptions.py
 
+# RAG-052: variáveis lidas via os.getenv puro (OTEL_*, ver
+# packages/observability/tracing.py) não vêm do parsing interno do
+# Pydantic Settings — só ficam visíveis ao processo se estiverem no
+# ambiente real do shell. "set -a; . ./.env; set +a" (só quando o
+# arquivo existe) exporta todo `.env` para variáveis de ambiente reais
+# antes de subir o processo, sem mudar como Settings lê `.env` (RAG-004
+# continua igual).
 run-api:
-	$(BIN)/uvicorn apps.api.main:app --reload --port 8000
+	set -a; [ -f .env ] && . ./.env; set +a; $(BIN)/uvicorn apps.api.main:app --reload --port 8000
+
+run-worker:
+	set -a; [ -f .env ] && . ./.env; set +a; $(BIN)/celery -A apps.indexing_worker.worker worker --loglevel=info
 
 # "Pipeline" local completo: o mesmo conjunto de verificações que o CI
 # (RAG-070+) deve reproduzir. Falha se lint, tipos, testes ou cobertura

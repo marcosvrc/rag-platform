@@ -16,8 +16,14 @@ from __future__ import annotations
 
 from adapters.queue.celery_app import configure_celery_app
 from packages.config.settings import get_settings
+from packages.observability.tracing import configure_tracing
 
 configure_celery_app(get_settings())
+# RAG-052 — precisa rodar no processo do worker também (não só na API):
+# é o que faz `CeleryInstrumentor` conseguir ler o contexto de trace
+# propagado na mensagem publicada pelo lado produtor e continuar o
+# mesmo trace na task consumida aqui.
+configure_tracing(service_name="rag-platform-indexing-worker")
 
 # Import por efeito colateral: registra `process_index_job_task` na app
 # Celery configurada acima. Precisa vir depois de `configure_celery_app`

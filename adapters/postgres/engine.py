@@ -11,13 +11,22 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from packages.config.settings import get_settings
+from packages.observability.tracing import instrument_sqlalchemy_engine
 
 
 @lru_cache
 def get_engine() -> AsyncEngine:
     """Engine assíncrono (driver `asyncpg`), cacheado por processo — um
-    único pool de conexões por processo, não um por request."""
-    return create_async_engine(get_settings().database_url, pool_pre_ping=True)
+    único pool de conexões por processo, não um por request.
+
+    Instrumentado para tracing (RAG-052) aqui, não globalmente: um
+    `instrument(engine=...)` por instância, porque testes recriam o
+    engine cacheado via `get_engine.cache_clear()` (ver
+    `tests/unit/test_database.py`) e cada instância nova precisa da sua
+    própria instrumentação."""
+    engine = create_async_engine(get_settings().database_url, pool_pre_ping=True)
+    instrument_sqlalchemy_engine(engine.sync_engine)
+    return engine
 
 
 @lru_cache
