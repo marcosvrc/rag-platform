@@ -7,12 +7,19 @@ de `test_knowledge_base_router.py` (RAG-012). A base de conhecimento é
 criada através do próprio endpoint de RAG-012 (`POST /v1/knowledge-bases`),
 já que os dois routers compartilham a mesma instância de
 `InMemoryKnowledgeBaseRepository` nestes testes.
+
+Autenticação (RAG-051): `_headers()` minta um JWT real (mesma chave/
+issuer/audience de `_test_settings()`) e o envia como `Authorization:
+Bearer <token>` — não existe mais um cabeçalho `X-Tenant-Id` não
+verificado.
 """
 
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import httpx
+import jwt
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
@@ -30,9 +37,27 @@ from packages.config.settings import Settings
 TENANT_A = str(uuid4())
 TENANT_B = str(uuid4())
 
+_JWT_SECRET = "test-jwt-secret-document-router-do-not-use-elsewhere"
+_JWT_ISSUER = "rag-platform-tests"
+_JWT_AUDIENCE = "rag-platform-tests-api"
+
+
+def _make_token(*, tenant_id: str | None = TENANT_A, subject: str = "test-user") -> str:
+    now = datetime.now(tz=UTC)
+    payload: dict[str, object] = {
+        "sub": subject,
+        "iss": _JWT_ISSUER,
+        "aud": _JWT_AUDIENCE,
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=5)).timestamp()),
+    }
+    if tenant_id is not None:
+        payload["tenant_id"] = tenant_id
+    return jwt.encode(payload, key=_JWT_SECRET, algorithm="HS256")
+
 
 def _headers(tenant_id: str = TENANT_A) -> dict[str, str]:
-    return {"X-Tenant-Id": tenant_id}
+    return {"Authorization": f"Bearer {_make_token(tenant_id=tenant_id)}"}
 
 
 def _test_settings(**overrides: object) -> Settings:
@@ -40,8 +65,9 @@ def _test_settings(**overrides: object) -> Settings:
         "_env_file": None,
         "POSTGRES_PASSWORD": SecretStr("x"),
         "MINIO_ROOT_PASSWORD": SecretStr("x"),
-        "JWT_ISSUER": "rag-platform-tests",
-        "JWT_AUDIENCE": "rag-platform-tests-api",
+        "JWT_SECRET": SecretStr(_JWT_SECRET),
+        "JWT_ISSUER": _JWT_ISSUER,
+        "JWT_AUDIENCE": _JWT_AUDIENCE,
         "DOCUMENT_MAX_SIZE_BYTES": 1024,
     }
     fields.update(overrides)
@@ -122,7 +148,7 @@ def test_upload_returns_202_with_pending_document_and_job(client: TestClient) ->
     assert body["index_job_type"] == "INDEX"
 
 
-def test_upload_requires_tenant_header(client: TestClient) -> None:
+def test_upload_requires_authorization_header(client: TestClient) -> None:
     knowledge_base_id = _create_knowledge_base(client)
 
     response = client.post(
@@ -132,6 +158,18 @@ def test_upload_requires_tenant_header(client: TestClient) -> None:
 
     assert response.status_code == 401
     assert response.headers["content-type"] == PROBLEM_JSON_MEDIA_TYPE
+
+
+def test_upload_rejects_token_without_tenant_id_claim(client: TestClient) -> None:
+    knowledge_base_id = _create_knowledge_base(client)
+
+    response = client.post(
+        f"/v1/knowledge-bases/{knowledge_base_id}/documents",
+        files={"file": ("guia.pdf", b"conteudo", "application/pdf")},
+        headers={"Authorization": f"Bearer {_make_token(tenant_id=None)}"},
+    )
+
+    assert response.status_code == 401
 
 
 def test_upload_to_unknown_knowledge_base_returns_404(client: TestClient) -> None:

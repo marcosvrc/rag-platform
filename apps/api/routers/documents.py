@@ -1,9 +1,9 @@
 """Endpoint de upload de documentos (RAG-021, seção 10.2 do plano).
 
 Mesmo isolamento por tenant de `apps/api/routers/knowledge_bases.py`
-(RAG-012): `tenant_id` vem de `get_current_tenant_id` e é repassado
-explicitamente; uma base de outro tenant (ou inexistente) retorna 404,
-nunca 403.
+(RAG-012/RAG-051): `tenant_id` vem de `get_current_tenant_id`
+(resolvido a partir de um JWT autenticado) e é repassado explicitamente;
+uma base de outro tenant (ou inexistente) retorna 404, nunca 403.
 """
 
 from __future__ import annotations
