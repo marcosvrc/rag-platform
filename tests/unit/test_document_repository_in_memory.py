@@ -11,6 +11,7 @@ from adapters.document_repository.in_memory import InMemoryDocumentRepository
 from packages.application.ports.document_repository import (
     DocumentChecksumConflictError,
     DocumentUpload,
+    DocumentVersionConflictError,
 )
 from packages.domain.entities.chunk import Chunk
 from packages.domain.entities.document_version import DocumentVersion
@@ -462,3 +463,54 @@ class TestRag026PersistChunksAndActivateVersion:
         document = await repository.get_document(document_id=upload.document.id)
         assert document is not None
         assert document.status == DocumentStatus.INDEXED
+
+
+class TestRag027CreateReindexJob:
+    """RAG-027: `create_reindex_job` cria uma nova `DocumentVersion` +
+    `IndexJob` (tipo REINDEX) juntos, sem tocar no documento nem em
+    versões existentes."""
+
+    async def test_creates_new_version_and_reindex_job(
+        self, repository: InMemoryDocumentRepository
+    ) -> None:
+        upload = await repository.create_document(
+            tenant_id=TENANT_ID,
+            knowledge_base_id=KNOWLEDGE_BASE_ID,
+            name="guia.pdf",
+            mime_type="application/pdf",
+            checksum="10" * 32,
+            object_key="kb/checksum/guia.pdf",
+            idempotency_key=None,
+        )
+
+        result = await repository.create_reindex_job(
+            document_id=upload.document.id, object_key=upload.version.object_key, version=2
+        )
+
+        assert result.version.version == 2
+        assert result.version.document_id == upload.document.id
+        assert result.version.object_key == upload.version.object_key
+        assert result.index_job.type == IndexJobType.REINDEX
+        assert result.index_job.status == ProcessingStatus.PENDING
+
+        latest = await repository.get_latest_version(document_id=upload.document.id)
+        assert latest is not None
+        assert latest.id == result.version.id
+
+    async def test_conflicting_version_number_raises(
+        self, repository: InMemoryDocumentRepository
+    ) -> None:
+        upload = await repository.create_document(
+            tenant_id=TENANT_ID,
+            knowledge_base_id=KNOWLEDGE_BASE_ID,
+            name="guia.pdf",
+            mime_type="application/pdf",
+            checksum="11" * 32,
+            object_key="kb/checksum/guia.pdf",
+            idempotency_key=None,
+        )
+
+        with pytest.raises(DocumentVersionConflictError):
+            await repository.create_reindex_job(
+                document_id=upload.document.id, object_key=upload.version.object_key, version=1
+            )

@@ -47,6 +47,8 @@ from packages.application.ports.document_repository import (
     DocumentChecksumConflictError,
     DocumentRepositoryPort,
     DocumentUpload,
+    DocumentVersionConflictError,
+    ReindexJob,
 )
 from packages.domain.entities.chunk import Chunk
 from packages.domain.entities.document import Document
@@ -339,6 +341,36 @@ class PostgresDocumentRepository(DocumentRepositoryPort):
             .values(status=DocumentStatus.INDEXED, active_version_id=version_id)
         )
         await self._session.commit()
+
+    async def create_reindex_job(
+        self, *, document_id: UUID, object_key: str, version: int
+    ) -> ReindexJob:
+        now = datetime.now(UTC)
+        version_model = DocumentVersionModel(
+            id=uuid4(),
+            document_id=document_id,
+            version=version,
+            object_key=object_key,
+            created_at=now,
+        )
+        job_model = IndexJobModel(
+            id=uuid4(),
+            document_id=document_id,
+            type=IndexJobType.REINDEX,
+            status=ProcessingStatus.PENDING,
+            attempts=0,
+            created_at=now,
+            updated_at=now,
+        )
+        self._session.add_all([version_model, job_model])
+        try:
+            await self._session.commit()
+        except IntegrityError as exc:
+            await self._session.rollback()
+            raise DocumentVersionConflictError(document_id=document_id, version=version) from exc
+        return ReindexJob(
+            version=_version_to_entity(version_model), index_job=_job_to_entity(job_model)
+        )
 
     async def mark_index_job_failed(
         self,

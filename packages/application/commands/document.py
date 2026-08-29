@@ -1,11 +1,23 @@
-"""Comando de upload de documentos (RAG-021/RAG-022, seção 11 do plano).
+"""Comando de upload e reindexação de documentos (RAG-021/RAG-022/RAG-027,
+seção 11 do plano).
 
-Implementa os passos 1-6 do fluxo de indexação: validar, calcular
-checksum, detectar duplicidade, armazenar arquivo, criar documento +
-versão + job (RAG-021), e publicar o job na fila (RAG-022) — só quando
-algo novo foi de fato criado (`not upload.replayed`); uma repetição
-idempotente não publica de novo, já que o job original já está (ou já
-foi) na fila."""
+`upload_document` implementa os passos 1-6 do fluxo de indexação:
+validar, calcular checksum, detectar duplicidade, armazenar arquivo,
+criar documento + versão + job (RAG-021), e publicar o job na fila
+(RAG-022) — só quando algo novo foi de fato criado (`not
+upload.replayed`); uma repetição idempotente não publica de novo, já
+que o job original já está (ou já foi) na fila.
+
+`reindex_document` (RAG-027) reprocessa o conteúdo original de um
+documento já `INDEXED`: cria uma nova `DocumentVersion` (mesma
+`object_key`, versão incrementada) + um novo `IndexJob` (tipo
+`REINDEX`) e publica na fila — nunca troca o arquivo original, só pede
+um novo processamento dele (útil após mudar a config de chunking da
+base, ou o modelo de embeddings por trás do alias). O documento
+continua consultável pela versão ativa atual (`consultas continuam
+disponíveis`, critério de aceite do RAG-027) até o worker terminar de
+processar a nova versão e ativá-la (RAG-026,
+`persist_chunks_and_activate_version`)."""
 
 from __future__ import annotations
 
@@ -17,11 +29,14 @@ from packages.application.ports.document_repository import (
     DocumentChecksumConflictError,
     DocumentRepositoryPort,
     DocumentUpload,
+    DocumentVersionConflictError,
     IdempotencyKeyConflictError,
+    ReindexJob,
 )
 from packages.application.ports.job_queue import JobQueuePort
 from packages.application.ports.knowledge_base_repository import KnowledgeBaseRepositoryPort
 from packages.application.ports.object_storage import ObjectStoragePort, sanitize_object_key
+from packages.domain.enums.document_status import DocumentStatus
 
 # Formatos aceitos (seção 2 do plano: "receber documentos PDF, Markdown,
 # TXT e DOCX"; RAG-023 os extrai). Fixo — não é configuração de
@@ -155,3 +170,59 @@ async def upload_document(
     if not upload.replayed:
         job_queue.enqueue_index_job(index_job_id=upload.index_job.id)
     return upload
+
+
+async def reindex_document(
+    document_repository: DocumentRepositoryPort,
+    knowledge_base_repository: KnowledgeBaseRepositoryPort,
+    job_queue: JobQueuePort,
+    *,
+    tenant_id: UUID,
+    knowledge_base_id: UUID,
+    document_id: UUID,
+) -> ReindexJob:
+    """RAG-027: dispara uma reindexação do conteúdo original já
+    armazenado (nunca aceita um novo arquivo — isso continua sendo
+    `upload_document`, cujo checksum duplicado já é rejeitado)."""
+    knowledge_base = await knowledge_base_repository.get_by_id(
+        tenant_id=tenant_id, knowledge_base_id=knowledge_base_id
+    )
+    if knowledge_base is None:
+        raise NotFoundError(detail="Base de conhecimento não encontrada.")
+
+    document = await document_repository.get_document(document_id=document_id)
+    # `Document` não carrega tenant_id próprio: a checagem de
+    # `knowledge_base_id` é o que isola por tenant aqui (mesmo padrão
+    # transitivo de `find_by_checksum`) — um documento de outra base
+    # (ou de outro tenant, que nunca teria passado no `get_by_id`
+    # acima) nunca é distinguível de um documento inexistente.
+    if document is None or document.knowledge_base_id != knowledge_base_id:
+        raise NotFoundError(detail="Documento não encontrado.")
+
+    if document.status != DocumentStatus.INDEXED:
+        raise ConflictError(
+            detail=(
+                "Documento precisa estar indexado para poder ser reindexado "
+                f"(status atual: {document.status.value})."
+            )
+        )
+
+    latest_version = await document_repository.get_latest_version(document_id=document_id)
+    if latest_version is None:
+        # Defensivo: um documento INDEXED sempre tem ao menos a versão 1
+        # (criada junto com o documento, RAG-021) — não deveria acontecer.
+        raise NotFoundError(detail="Nenhuma versão encontrada para este documento.")
+
+    try:
+        result = await document_repository.create_reindex_job(
+            document_id=document_id,
+            object_key=latest_version.object_key,
+            version=latest_version.version + 1,
+        )
+    except DocumentVersionConflictError as exc:
+        raise ConflictError(
+            detail="Já existe uma reindexação em andamento para este documento."
+        ) from exc
+
+    job_queue.enqueue_index_job(index_job_id=result.index_job.id)
+    return result

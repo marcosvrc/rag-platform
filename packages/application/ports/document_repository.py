@@ -63,6 +63,23 @@ class IdempotencyKeyConflictError(Exception):
         )
 
 
+class DocumentVersionConflictError(Exception):
+    """Já existe uma `DocumentVersion` com este número de versão para
+    este documento (unique constraint `document_id` + `version`,
+    RAG-011) — só pode acontecer sob corrida genuína entre duas
+    reindexações simultâneas do mesmo documento (RAG-027); o caminho
+    comum (uma reindexação por vez) nunca esbarra nisto, porque o
+    número de versão vem de `get_latest_version` logo antes."""
+
+    def __init__(self, *, document_id: UUID, version: int) -> None:
+        self.document_id = document_id
+        self.version = version
+        super().__init__(
+            f"Já existe a versão {version} do documento {document_id} "
+            "(reindexação concorrente do mesmo documento?)."
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class DocumentUpload:
     """Resultado de uma criação (ou repetição idempotente) de documento."""
@@ -73,6 +90,17 @@ class DocumentUpload:
     replayed: bool
     """`True` quando este resultado veio de uma `Idempotency-Key` já
     usada antes (nada novo foi criado nesta chamada)."""
+
+
+@dataclass(frozen=True, slots=True)
+class ReindexJob:
+    """Resultado de uma reindexação (RAG-027): a nova `DocumentVersion`
+    (número incrementado, mesma `object_key` da versão anterior — o
+    conteúdo original não muda, só o processamento) e o novo `IndexJob`
+    (tipo `REINDEX`, status `PENDING`) criados juntos para ela."""
+
+    version: DocumentVersion
+    index_job: IndexJob
 
 
 class DocumentRepositoryPort(ABC):
@@ -212,3 +240,22 @@ class DocumentRepositoryPort(ABC):
         ainda vai reagendar esta mesma tentativa lógica com backoff
         exponencial — não há necessidade de reivindicar o job de novo,
         `claim_index_job` só é chamado na primeira tentativa)."""
+
+    @abstractmethod
+    async def create_reindex_job(
+        self, *, document_id: UUID, object_key: str, version: int
+    ) -> ReindexJob:
+        """Cria uma nova `DocumentVersion` (`version`, `object_key`
+        reaproveitado da versão anterior — reindexação reprocessa o
+        mesmo conteúdo original, nunca troca o arquivo) + um novo
+        `IndexJob` (tipo `REINDEX`, status `PENDING`), na mesma
+        transação lógica (RAG-027, mesmo espírito de `create_document`
+        para a versão 1). Quem chama (`packages.application.commands.
+        document.reindex_document`) já validou que o documento está
+        `INDEXED` e resolveu `version`/`object_key` a partir de
+        `get_latest_version` — este método não repete essas checagens.
+
+        Levanta `DocumentVersionConflictError` no caso raro de corrida
+        entre duas reindexações do mesmo documento (mesma categoria de
+        `IdempotencyKeyConflictError` em `create_document`: a unique
+        constraint do banco garante a consistência final)."""

@@ -17,6 +17,8 @@ from packages.application.ports.document_repository import (
     DocumentChecksumConflictError,
     DocumentRepositoryPort,
     DocumentUpload,
+    DocumentVersionConflictError,
+    ReindexJob,
 )
 from packages.domain.entities.chunk import Chunk
 from packages.domain.entities.document import Document
@@ -201,3 +203,32 @@ class InMemoryDocumentRepository(DocumentRepositoryPort):
         """Helper apenas de teste: lista os chunks persistidos para uma
         versão, na ordem de inserção. Não faz parte de DocumentRepositoryPort."""
         return [chunk for chunk in self._chunks.values() if chunk.version_id == version_id]
+
+    async def create_reindex_job(
+        self, *, document_id: UUID, object_key: str, version: int
+    ) -> ReindexJob:
+        if any(
+            v.document_id == document_id and v.version == version for v in self._versions.values()
+        ):
+            raise DocumentVersionConflictError(document_id=document_id, version=version)
+
+        now = datetime.now(UTC)
+        new_version = DocumentVersion(
+            id=uuid4(),
+            document_id=document_id,
+            version=version,
+            object_key=object_key,
+            created_at=now,
+        )
+        index_job = IndexJob(
+            id=uuid4(),
+            document_id=document_id,
+            type=IndexJobType.REINDEX,
+            status=ProcessingStatus.PENDING,
+            attempts=0,
+            created_at=now,
+            updated_at=now,
+        )
+        self._versions[new_version.id] = new_version
+        self._jobs[index_job.id] = index_job
+        return ReindexJob(version=new_version, index_job=index_job)

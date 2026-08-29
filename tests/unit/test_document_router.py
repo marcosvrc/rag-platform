@@ -14,6 +14,7 @@ Bearer <token>` — não existe mais um cabeçalho `X-Tenant-Id` não
 verificado.
 """
 
+import asyncio
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -261,3 +262,113 @@ def test_upload_with_same_idempotency_key_and_different_content_returns_409(
     )
 
     assert response.status_code == 409
+
+
+async def _index_document(
+    document_repository: InMemoryDocumentRepository, *, document_id: UUID, version_id: UUID
+) -> None:
+    """Simula uma indexação inicial bem-sucedida (RAG-026) diretamente
+    no fake, sem subir um worker real — só para deixar o documento em
+    INDEXED antes de exercitar o endpoint de reindexação (RAG-027)."""
+    await document_repository.mark_document_processing(document_id=document_id)
+    await document_repository.persist_chunks_and_activate_version(
+        document_id=document_id,
+        version_id=version_id,
+        extracted_object_key=f"{document_id}/v1/extracted.md",
+        chunks=[],
+    )
+
+
+def test_reindex_returns_202_with_new_version_and_job(
+    client: TestClient, document_repository: InMemoryDocumentRepository
+) -> None:
+    knowledge_base_id = _create_knowledge_base(client)
+    upload_response = _upload_pdf(client, knowledge_base_id)
+    document_id = upload_response.json()["document_id"]
+    version = asyncio.run(document_repository.get_latest_version(document_id=UUID(document_id)))
+    assert version is not None
+    asyncio.run(
+        _index_document(document_repository, document_id=UUID(document_id), version_id=version.id)
+    )
+
+    response = client.post(
+        f"/v1/knowledge-bases/{knowledge_base_id}/documents/{document_id}/reindex",
+        headers=_headers(),
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["document_id"] == document_id
+    assert body["knowledge_base_id"] == knowledge_base_id
+    assert body["version"] == 2
+    assert body["index_job_type"] == "REINDEX"
+    assert body["index_job_status"] == "PENDING"
+
+
+def test_reindex_enqueues_the_new_job(
+    client: TestClient,
+    document_repository: InMemoryDocumentRepository,
+    job_queue: InMemoryJobQueue,
+) -> None:
+    knowledge_base_id = _create_knowledge_base(client)
+    upload_response = _upload_pdf(client, knowledge_base_id)
+    document_id = upload_response.json()["document_id"]
+    version = asyncio.run(document_repository.get_latest_version(document_id=UUID(document_id)))
+    assert version is not None
+    asyncio.run(
+        _index_document(document_repository, document_id=UUID(document_id), version_id=version.id)
+    )
+    job_queue.enqueued_index_job_ids.clear()
+
+    response = client.post(
+        f"/v1/knowledge-bases/{knowledge_base_id}/documents/{document_id}/reindex",
+        headers=_headers(),
+    )
+
+    new_index_job_id = UUID(response.json()["index_job_id"])
+    assert job_queue.enqueued_index_job_ids == [new_index_job_id]
+
+
+def test_reindex_a_document_not_yet_indexed_returns_409(client: TestClient) -> None:
+    knowledge_base_id = _create_knowledge_base(client)
+    upload_response = _upload_pdf(client, knowledge_base_id)
+    document_id = upload_response.json()["document_id"]
+
+    response = client.post(
+        f"/v1/knowledge-bases/{knowledge_base_id}/documents/{document_id}/reindex",
+        headers=_headers(),
+    )
+
+    assert response.status_code == 409
+    assert response.headers["content-type"] == PROBLEM_JSON_MEDIA_TYPE
+
+
+def test_reindex_unknown_document_returns_404(client: TestClient) -> None:
+    knowledge_base_id = _create_knowledge_base(client)
+
+    response = client.post(
+        f"/v1/knowledge-bases/{knowledge_base_id}/documents/{uuid4()}/reindex",
+        headers=_headers(),
+    )
+
+    assert response.status_code == 404
+
+
+def test_reindex_another_tenants_document_returns_404(
+    client: TestClient, document_repository: InMemoryDocumentRepository
+) -> None:
+    knowledge_base_id = _create_knowledge_base(client, tenant_id=TENANT_A)
+    upload_response = _upload_pdf(client, knowledge_base_id, tenant_id=TENANT_A)
+    document_id = upload_response.json()["document_id"]
+    version = asyncio.run(document_repository.get_latest_version(document_id=UUID(document_id)))
+    assert version is not None
+    asyncio.run(
+        _index_document(document_repository, document_id=UUID(document_id), version_id=version.id)
+    )
+
+    response = client.post(
+        f"/v1/knowledge-bases/{knowledge_base_id}/documents/{document_id}/reindex",
+        headers=_headers(TENANT_B),
+    )
+
+    assert response.status_code == 404
