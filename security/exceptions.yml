@@ -1,0 +1,27 @@
+# rag-platform — exceções de segurança (RAG-071)
+#
+# Toda supressão de um achado de segurança precisa de uma entrada aqui
+# com justificativa e prazo (`expires`, formato AAAA-MM-DD). O job
+# `security-exceptions` do workflow de PR falha se alguma entrada não
+# tiver os dois campos, se `expires` for inválido, ou se já tiver
+# vencido — nesse caso a exceção precisa ser renovada ou o achado
+# corrigido.
+#
+# Isso é o registro de auditoria; a supressão em si continua sendo
+# feita no mecanismo nativo de cada ferramenta:
+#   - gitleaks:  seção [[allowlist.regexes]]/paths em .gitleaks.toml
+#   - bandit:    comentário `# nosec <ID>` na linha do achado
+#   - pip-audit: flag `--ignore-vuln <ID>` (adicionar no workflow)
+#   - hadolint:  chave `ignored` em .hadolint.yaml
+#
+# Exemplo (mantenha comentado até existir uma exceção real):
+#
+# gitleaks:
+#   - rule: generic-api-key
+#     path: "tests/fixtures/exemplo.txt"
+#     justification: "Chave de exemplo sem valor real, usada só em teste."
+#     expires: "2026-12-31"
+gitleaks: []
+bandit: []
+pip_audit: []
+hadolint: []

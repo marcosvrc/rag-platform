@@ -1,0 +1,7 @@
+# rag-platform — configuração do hadolint (RAG-071)
+#
+# Nenhuma regra é ignorada por padrão. Qualquer regra adicionada a
+# `ignored` abaixo precisa ter uma exceção correspondente em
+# security/exceptions.yml (chave `hadolint`), com justificativa e
+# prazo.
+ignored: []

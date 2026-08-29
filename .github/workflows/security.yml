@@ -1,0 +1,165 @@
+# RAG-071 — Segurança no CI.
+#
+# Adiciona os quatro controles exigidos pelo backlog em toda PR aberta
+# contra `master`: secret scanning (gitleaks), SAST (bandit), SCA
+# (pip-audit) e lint de segurança de Dockerfile (hadolint). Convive com
+# `pull-request.yml` (RAG-070), que cobre lint/tipos/testes/migrations.
+#
+# Uma vulnerabilidade "crítica" bloqueia a PR:
+#   - gitleaks:  qualquer segredo encontrado falha o job (--exit-code 1).
+#   - bandit:    só falha em achados de severidade HIGH
+#                (--severity-level high); LOW/MEDIUM ficam visíveis no
+#                log do job `sast-report`, sem bloquear.
+#   - pip-audit: falha em qualquer vulnerabilidade conhecida nas
+#                dependências (a base de dados de advisories do Python
+#                nem sempre expõe severidade — tratamos toda ocorrência
+#                como bloqueante por padrão).
+#   - hadolint:  só falha em regras de nível "error"
+#                (--failure-threshold error); regras de nível "warning"
+#                ficam visíveis, sem bloquear. Roda apenas se existir
+#                Dockerfile no repositório (nenhum ainda — chega em
+#                RAG-072).
+#
+# Exceções documentadas (justificativa + prazo) vivem em
+# security/exceptions.yml; o job `security-exceptions` falha a PR se
+# alguma entrada estiver incompleta ou vencida.
+name: Security
+
+on:
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  GITLEAKS_VERSION: "8.30.1"
+  HADOLINT_VERSION: "2.15.1"
+
+jobs:
+  secret-scanning:
+    name: Secret scanning (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (histórico completo)
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Baixar gitleaks
+        run: |
+          curl -sSL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar xzf gitleaks.tar.gz gitleaks
+
+      - name: gitleaks detect
+        run: ./gitleaks detect --source . --config .gitleaks.toml --redact --exit-code 1 -v
+
+  sast:
+    name: SAST (Bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Configurar Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Instalar dependências
+        run: pip install -e ".[dev]"
+
+      - name: Relatório completo (informativo, não bloqueia)
+        run: bandit -c pyproject.toml -r apps packages adapters --severity-level all || true
+
+      - name: Gate — bloqueia em severidade HIGH
+        run: bandit -c pyproject.toml -r apps packages adapters --severity-level high
+
+  sca:
+    name: SCA (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Configurar Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Instalar dependências
+        run: pip install -e ".[dev]"
+
+      - name: pip-audit
+        run: pip-audit
+
+  dockerfile-scan:
+    name: Lint de Dockerfile (hadolint)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Localizar Dockerfiles
+        id: find
+        run: |
+          files=$(find . -type f \( -iname "Dockerfile" -o -iname "Dockerfile.*" -o -iname "*.Dockerfile" \) \
+            -not -path "./.git/*" | sort)
+          if [ -z "$files" ]; then
+            echo "Nenhum Dockerfile encontrado ainda (chega em RAG-072) — nada para escanear."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "files<<EOF_FILES"
+              echo "$files"
+              echo "EOF_FILES"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Baixar hadolint
+        if: steps.find.outputs.found == 'true'
+        run: |
+          curl -sSL -o hadolint \
+            "https://github.com/hadolint/hadolint/releases/download/v${HADOLINT_VERSION}/hadolint-Linux-x86_64"
+          chmod +x hadolint
+
+      - name: hadolint (bloqueia só em severidade "error")
+        if: steps.find.outputs.found == 'true'
+        run: |
+          status=0
+          while IFS= read -r file; do
+            ./hadolint --config .hadolint.yaml --failure-threshold error "$file" || status=1
+          done <<< "${{ steps.find.outputs.files }}"
+          exit $status
+
+  security-exceptions:
+    name: Validar exceções de segurança
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Configurar Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Instalar dependências
+        run: pip install -e ".[dev]"
+
+      - name: check_security_exceptions.py
+        run: python scripts/check_security_exceptions.py
