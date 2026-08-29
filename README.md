@@ -927,3 +927,63 @@ rara entre duas reindexações do mesmo documento — para 409).
 e seu isolamento por tenant. `tests/unit/test_jobs_router.py` e as
 novas funções em `tests/unit/test_document_router.py` cobrem a visão
 HTTP dos dois endpoints (200/202/401/404/409).
+
+## Busca lexical (RAG-031)
+
+Implementa a recuperação de chunks por PostgreSQL Full Text Search —
+o objetivo do épico E3 que não depende de nenhuma decisão de produto
+ainda pendente (ao contrário do RAG-030, busca vetorial: continua
+bloqueada porque o modelo/alias real de embeddings, e portanto sua
+dimensão, ainda não foi escolhido por trás do gateway LiteLLM — decisão
+deliberadamente adiada no RAG-025 — e um índice ANN pgvector exige
+dimensão fixa. RAG-031 não tem essa dependência, por isso foi
+implementada primeiro).
+
+Migration 0004 adiciona `chunks.content_tsv`, uma coluna GERADA pelo
+Postgres (`GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED`,
+suportado desde o PostgreSQL 12) com um índice GIN — a aplicação nunca
+escreve nela, o Postgres recalcula sozinho sempre que `content` muda.
+Configuração `simple` (não `portuguese` nem outro idioma específico):
+o conteúdo de um chunk pode estar em qualquer idioma que o tenant
+carregar, e a plataforma não pergunta o idioma em nenhum lugar do
+fluxo de upload — `simple` é um denominador comum seguro, sem
+stemming específico de idioma; trocar para uma configuração dedicada
+por base de conhecimento é uma decisão futura, não deste RAG.
+
+`packages/application/ports/lexical_search.py` define `LexicalSearchPort`
+(`search(tenant_id, knowledge_base_id, query, limit) -> list[ScoredChunk]`)
+e `adapters/lexical_search/postgres.py` (`PostgresLexicalSearch`) a
+implementa via `ts_rank` + o operador `@@` contra `content_tsv`,
+compilado pelo SQLAlchemy para exatamente a forma que o planner do
+Postgres casa com o índice GIN. Três critérios de aceite, todos no
+próprio `WHERE`/`ORDER BY` da consulta, nunca em Python depois:
+- **Filtros antes do ranking**: `chunks.tenant_id`/`chunks.knowledge_base_id`
+  (já denormalizados na tabela, RAG-011) entram no `WHERE`.
+- **Só a versão ativa**: um `JOIN` com `documents` em
+  `documents.active_version_id == chunks.version_id` exclui chunks de
+  qualquer versão superada por uma reindexação (RAG-026/027) — mesmo
+  que ainda existam fisicamente na tabela (`persist_chunks_and_
+  activate_version` não apaga chunks de versões antigas ao ativar uma
+  nova, um efeito colateral de armazenamento conhecido e aceito, não
+  uma falha de isolamento).
+- **Ranking determinístico**: `ORDER BY ts_rank(...) DESC, chunks.id ASC`
+  — o `id` como desempate estável, já que `ts_rank` sozinho não separa
+  scores empatados.
+
+`adapters/lexical_search/in_memory.py` (`InMemoryLexicalSearch`) é um
+fake para testar só o contrato da porta (filtros de tenant/base,
+ordenação determinística, `limit`) sem Postgres — não modela versões
+nem "versão ativa" (`Chunk` não carrega `document_id`), e usa uma
+contagem de termos simples em vez de `ts_rank`; quem monta um cenário
+de teste com ele só deve indexar chunks que já representem uma versão
+ativa, mesmo cuidado que qualquer teste com `InMemoryDocumentRepository`.
+
+Testes: `tests/unit/test_lexical_search_in_memory.py` cobre o contrato
+da porta (filtro por tenant, por base, ranking por número de termos,
+desempate determinístico, `limit`, query sem termos relevantes).
+`tests/unit/test_schema.py::test_chunks_content_tsv_has_a_gin_index`
+verifica a coluna gerada e o índice GIN a partir de `Base.metadata`
+(mesma abordagem sem banco real do RAG-011) — "índice GIN utilizado"
+de fato (via `EXPLAIN` contra um Postgres real) fica para
+`tests/integration/`, quando essa suíte existir, mesma limitação já
+documentada para os demais adapters Postgres deste projeto.

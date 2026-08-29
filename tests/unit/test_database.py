@@ -87,21 +87,24 @@ def test_get_session_factory_is_bound_to_the_cached_engine(configured_env: None)
 def test_migrations_have_a_single_well_formed_head() -> None:
     """Valida a árvore de revisões do Alembic offline (sem conectar a
     nenhum banco): garante que existe uma única head, alcançável a
-    partir da base, e que ela é a migration 0003 (document_idempotency_keys,
-    RAG-021), encadeada corretamente depois da 0002 (schema inicial,
+    partir da base, e que ela é a migration 0004 (índice de busca
+    lexical, RAG-031), encadeada corretamente depois da 0003
+    (document_idempotency_keys, RAG-021), da 0002 (schema inicial,
     RAG-011) e da 0001 (pgvector)."""
     config = Config(str(REPO_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(REPO_ROOT / "migrations"))
     script = ScriptDirectory.from_config(config)
 
     heads = script.get_heads()
-    assert heads == ["0003"]
+    assert heads == ["0004"]
 
     revisions = list(script.walk_revisions())
-    assert [r.revision for r in revisions] == ["0003", "0002", "0001"]
-    assert revisions[0].down_revision == "0002"
-    assert revisions[1].down_revision == "0001"
-    assert revisions[2].down_revision is None
-    assert "document_idempotency_keys" in (revisions[0].doc or "")
-    assert "core schema" in (revisions[1].doc or "")
-    assert "pgvector" in (revisions[2].doc or "")
+    assert [r.revision for r in revisions] == ["0004", "0003", "0002", "0001"]
+    assert revisions[0].down_revision == "0003"
+    assert revisions[1].down_revision == "0002"
+    assert revisions[2].down_revision == "0001"
+    assert revisions[3].down_revision is None
+    assert "lexical search" in (revisions[0].doc or "")
+    assert "document_idempotency_keys" in (revisions[1].doc or "")
+    assert "core schema" in (revisions[2].doc or "")
+    assert "pgvector" in (revisions[3].doc or "")
