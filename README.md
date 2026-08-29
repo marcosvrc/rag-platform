@@ -882,3 +882,48 @@ cobre a orquestração completa do `PipelineDocumentProcessor` com fakes
 para as 5 portas: pipeline de ponta a ponta com sucesso, reprocessamento
 idempotente, e os três casos defensivos (job sumido, documento sem
 versão, base de conhecimento ausente).
+
+## Status de indexação e reindexação (RAG-027)
+
+Implementa o objetivo do épico E2 restante: expor o status de um job
+de indexação ao cliente e permitir disparar uma nova indexação sem
+subir um arquivo de novo.
+
+`GET /v1/jobs/{index_job_id}` (prometido desde o RAG-021, ver o
+docstring de `DocumentUploadResponse`) devolve estado e erros de um
+`IndexJob`: `status`, `attempts`, `error_code`, `error_message`. Como
+`IndexJob` não carrega `tenant_id` (só `document_id`), o isolamento é
+transitivo — `packages/application/queries/document.py::
+get_index_job_status` resolve `IndexJob` -> `Document` ->
+`KnowledgeBase` (via `get_by_id_unscoped`, RAG-026) e só então compara
+`KnowledgeBase.tenant_id` contra o tenant autenticado; um job de outro
+tenant (ou inexistente) é sempre 404, nunca 403 (mesmo padrão do resto
+da API).
+
+`POST /v1/knowledge-bases/{id}/documents/{document_id}/reindex`
+(`packages/application/commands/document.py::reindex_document`) dispara
+uma reindexação: cria uma nova `DocumentVersion` (mesma `object_key` da
+versão anterior — o conteúdo original nunca muda, só o processamento;
+número de versão incrementado) + um novo `IndexJob` (tipo `REINDEX`,
+já existente desde o RAG-010) e publica na fila, reaproveitando o novo
+método `DocumentRepositoryPort.create_reindex_job` (RAG-027). Só é
+permitida quando o documento está `INDEXED` — caso contrário, 409
+(`Documento precisa estar indexado para poder ser reindexado`).
+
+**"Consultas continuam disponíveis" (critério de aceite)**: disparar
+uma reindexação não toca no `Document.status` nem em `active_version_id`
+— eles só mudam quando o worker de fato processa o novo job e chama
+`persist_chunks_and_activate_version` (RAG-026). Entre o disparo e essa
+ativação, o cliente continua recebendo a versão ativa anterior em
+qualquer consulta (retrieval, RAG-030+) — nunca um estado parcial da
+reindexação em andamento.
+
+Testes: `tests/unit/test_document_reindex_command.py` cobre os
+critérios de aceite do comando (nova versão, reindexação só permitida
+em `INDEXED`, documento/base de outro tenant nunca distinguível de
+inexistente, e o mapeamento de `DocumentVersionConflictError` — corrida
+rara entre duas reindexações do mesmo documento — para 409).
+`tests/unit/test_document_status_query.py` cobre a consulta de status
+e seu isolamento por tenant. `tests/unit/test_jobs_router.py` e as
+novas funções em `tests/unit/test_document_router.py` cobrem a visão
+HTTP dos dois endpoints (200/202/401/404/409).

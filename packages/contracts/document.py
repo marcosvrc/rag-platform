@@ -38,3 +38,35 @@ class DocumentUploadResponse(BaseModel):
     index_job_type: IndexJobType
     index_job_status: ProcessingStatus
     created_at: datetime
+
+
+class ReindexResponse(BaseModel):
+    """Corpo de `202 Accepted` de
+    `POST /v1/knowledge-bases/{id}/documents/{document_id}/reindex`
+    (RAG-027) -- mesmo espirito de `DocumentUploadResponse`: confirma a
+    nova versao e o novo job criados, nunca o resultado da reindexacao
+    em si (isso tambem e `GET /v1/jobs/{job_id}`)."""
+
+    document_id: UUID
+    knowledge_base_id: UUID
+    version: int
+    index_job_id: UUID
+    index_job_type: IndexJobType
+    index_job_status: ProcessingStatus
+    created_at: datetime
+
+
+class IndexJobStatusResponse(BaseModel):
+    """Corpo de `GET /v1/jobs/{index_job_id}` (RAG-027) -- estados e
+    erros de um job de indexacao, consultaveis pelo id devolvido em
+    `DocumentUploadResponse.index_job_id`/`ReindexResponse.index_job_id`."""
+
+    index_job_id: UUID
+    document_id: UUID
+    type: IndexJobType
+    status: ProcessingStatus
+    attempts: int
+    error_code: str | None
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime

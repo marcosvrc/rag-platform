@@ -23,12 +23,16 @@ from adapters.queue.celery_job_queue import CeleryJobQueue
 from apps.api.dependencies import get_current_tenant_id, get_settings_dependency
 from apps.api.routers.knowledge_bases import get_knowledge_base_repository
 from packages.application.commands import document as document_commands
-from packages.application.ports.document_repository import DocumentRepositoryPort, DocumentUpload
+from packages.application.ports.document_repository import (
+    DocumentRepositoryPort,
+    DocumentUpload,
+    ReindexJob,
+)
 from packages.application.ports.job_queue import JobQueuePort
 from packages.application.ports.knowledge_base_repository import KnowledgeBaseRepositoryPort
 from packages.application.ports.object_storage import ObjectStoragePort
 from packages.config.settings import Settings
-from packages.contracts.document import DocumentUploadResponse
+from packages.contracts.document import DocumentUploadResponse, ReindexResponse
 
 router = APIRouter(prefix="/v1/knowledge-bases", tags=["documents"])
 
@@ -72,6 +76,20 @@ def _to_response(upload: DocumentUpload) -> DocumentUploadResponse:
     )
 
 
+def _to_reindex_response(
+    result: ReindexJob, *, document_id: UUID, knowledge_base_id: UUID
+) -> ReindexResponse:
+    return ReindexResponse(
+        document_id=document_id,
+        knowledge_base_id=knowledge_base_id,
+        version=result.version.version,
+        index_job_id=result.index_job.id,
+        index_job_type=result.index_job.type,
+        index_job_status=result.index_job.status,
+        created_at=result.version.created_at,
+    )
+
+
 @router.post(
     "/{knowledge_base_id}/documents",
     response_model=DocumentUploadResponse,
@@ -103,3 +121,29 @@ async def upload_document(
         idempotency_key=idempotency_key,
     )
     return _to_response(upload)
+
+
+@router.post(
+    "/{knowledge_base_id}/documents/{document_id}/reindex",
+    response_model=ReindexResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def reindex_document(
+    knowledge_base_id: UUID,
+    document_id: UUID,
+    tenant_id: UUID = Depends(get_current_tenant_id),
+    document_repository: DocumentRepositoryPort = Depends(get_document_repository),
+    knowledge_base_repository: KnowledgeBaseRepositoryPort = Depends(get_knowledge_base_repository),
+    job_queue: JobQueuePort = Depends(get_job_queue),
+) -> ReindexResponse:
+    result = await document_commands.reindex_document(
+        document_repository,
+        knowledge_base_repository,
+        job_queue,
+        tenant_id=tenant_id,
+        knowledge_base_id=knowledge_base_id,
+        document_id=document_id,
+    )
+    return _to_reindex_response(
+        result, document_id=document_id, knowledge_base_id=knowledge_base_id
+    )
