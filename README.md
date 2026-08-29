@@ -21,6 +21,8 @@ Concluído até o momento:
   + extensão pgvector).
 - **RAG-005 — Criar API base e health checks** (FastAPI, `/health/live`,
   `/health/ready`).
+- **RAG-010 — Modelar entidades e estados** (entidades de domínio,
+  máquina de estados de `Document`).
 
 ## Desenvolvimento local
 
@@ -84,6 +86,7 @@ expõe `get_engine()`/`get_session_factory()`/`get_session()`
 
 Para gerar o SQL das migrations sem se conectar a um banco (útil para
 revisão em PR): `.venv/bin/alembic upgrade head --sql`.
+
 ## API (RAG-005)
 
 Com os serviços do `docker compose` (RAG-003) no ar e um `.env` válido
@@ -103,6 +106,55 @@ curl -i http://localhost:8000/health/ready
 processo está no ar, para não ser derrubado por uma falha temporária de
 uma dependência (isso é papel do `/health/ready`). Endpoints de negócio
 (`/v1/...`) chegam a partir de RAG-012.
+
+## Domínio (RAG-010)
+
+`packages/domain` contém as regras de negócio puras do produto (sem
+dependência de frameworks de infraestrutura), conforme a seção 9 do plano:
+
+- `entities/`: `Tenant`, `KnowledgeBase`, `Document`, `DocumentVersion`,
+  `Chunk`, `IndexJob`, `QueryLog` (+ `TokenUsage`), `QueryEvidence`,
+  `Feedback`, `EvaluationRun`. Todas são modelos Pydantic imutáveis
+  (`frozen=True`, sem campos extras).
+- `enums/`: os enums de status/tipo usados pelas entidades acima
+  (`DocumentStatus`, `TenantStatus`, `KnowledgeBaseStatus`,
+  `ProcessingStatus`, `IndexJobType`, `FeedbackRating`).
+- `exceptions/`: `DomainError` (base) e `InvalidStatusTransitionError`,
+  levantada quando uma transição de estado não é permitida.
+- `services/`: reservado para regras que orquestram múltiplas entidades;
+  ainda vazio — a única máquina de estados desta atividade
+  (`Document.transition_to`) vive na própria entidade.
+
+Convenções compartilhadas (seção 8 do plano), aplicadas via tipos
+`Annotated` em `entities/base.py`:
+
+- `EntityId`: `UUID` que precisa ser versão 4.
+- `UtcDateTime`: `datetime` que precisa ser timezone-aware e estar em UTC.
+
+### Máquina de estados de `Document`
+
+As transições permitidas seguem exatamente o diagrama da seção 9.1 do
+plano:
+
+```
+PENDING -> PROCESSING -> INDEXED
+                      -> FAILED
+                      -> QUARANTINED
+INDEXED -> PROCESSING -> INDEXED
+Qualquer estado (exceto DELETED) -> DELETED
+```
+
+`Document.transition_to(novo_status)` devolve uma nova instância (a
+entidade é imutável) ou levanta `InvalidStatusTransitionError` para
+qualquer transição fora dessa lista — incluindo, deliberadamente, um
+caminho de retry a partir de `FAILED`/`QUARANTINED`, que o plano não
+descreve.
+
+Rodar só os testes de domínio:
+
+```bash
+.venv/bin/pytest tests/unit/test_document.py tests/unit/test_domain_entities.py -q
+```
 
 ## Serviços locais (RAG-003)
 
