@@ -65,6 +65,7 @@ class Settings(BaseSettings):
     minio_root_user: str = Field(default="rag_platform", alias="MINIO_ROOT_USER")
     minio_root_password: SecretStr = Field(alias="MINIO_ROOT_PASSWORD")
     minio_use_ssl: bool = Field(default=False, alias="MINIO_USE_SSL")
+    minio_bucket: str = Field(default="rag-platform", alias="MINIO_BUCKET")
 
     @property
     def database_url(self) -> str:
@@ -84,6 +85,13 @@ class Settings(BaseSettings):
     def minio_endpoint(self) -> str:
         """Endpoint `host:port` do MinIO (ver RAG-020)."""
         return f"{self.minio_host}:{self.minio_port}"
+
+    @property
+    def minio_endpoint_url(self) -> str:
+        """Endpoint completo (`http(s)://host:port`) para o cliente S3
+        (RAG-020) — o SDK exige o esquema, `minio_endpoint` não tem."""
+        scheme = "https" if self.minio_use_ssl else "http"
+        return f"{scheme}://{self.minio_endpoint}"
 
 
 def load_settings(*, env_file: str | None = ".env") -> Settings:
