@@ -20,6 +20,7 @@ dependencies = [
     "uvicorn[standard]>=0.30,<1",
     "redis>=5.0,<6",
     "httpx>=0.27,<1",
+    "aioboto3>=13.0,<16",
 ]
 
 [project.optional-dependencies]
@@ -91,6 +92,9 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = "scripts.*"
 disallow_untyped_defs = false
+# aioboto3/aiobotocore/botocore não publicam stubs nem py.typed (RAG-020).
+module = ["aioboto3.*", "botocore.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "8.0"

@@ -29,6 +29,10 @@ Concluído até o momento:
   índices do modelo mínimo, migration 0002).
 - **RAG-071 — Adicionar segurança ao CI** (secret scanning, SAST, SCA e
   lint de Dockerfile, com governança de exceções).
+- **RAG-013 — Tratamento padronizado de erros** (Problem Details,
+  RFC 7807, com `request_id` de correlação).
+- **RAG-020 — Implementar porta de object storage** (interface +
+  adapter MinIO/S3 via `aioboto3`, sanitização de key, checksum).
 
 ## Desenvolvimento local
 
@@ -112,6 +116,38 @@ curl -i http://localhost:8000/health/ready
 processo está no ar, para não ser derrubado por uma falha temporária de
 uma dependência (isso é papel do `/health/ready`). Endpoints de negócio
 (`/v1/...`) chegam a partir de RAG-012.
+
+## Tratamento de erros (RAG-013)
+
+Qualquer erro em um endpoint de negócio vira
+[Problem Details](https://www.rfc-editor.org/rfc/rfc7807) (RFC 7807,
+`application/problem+json`), nunca uma stack trace:
+
+```bash
+curl -i http://localhost:8000/qualquer-rota-que-nao-existe
+# HTTP/1.1 404 Not Found
+# content-type: application/problem+json
+# x-request-id: 3fa2c1c0-...
+#
+# {"type": "about:blank", "title": "Not Found", "status": 404,
+#  "instance": "/qualquer-rota-que-nao-existe", "request_id": "3fa2c1c0-..."}
+```
+
+- `packages/application/errors.py`: categorias de erro independentes de
+  HTTP (`NotFoundError`, `ConflictError`, etc.) — usadas pelos casos de
+  uso, sem nenhum acoplamento a FastAPI.
+- `packages/contracts/problem_details.py`: o schema `ProblemDetail`
+  (Pydantic) que toda resposta de erro segue.
+- `apps/api/errors.py`: traduz cada erro de aplicação (e também
+  `DomainError`/`InvalidStatusTransitionError` de RAG-010, sempre como
+  409; `HTTPException`; erros de validação do Pydantic; e qualquer
+  exceção não tratada, como 500) para Problem Details, e atribui um
+  `request_id` de correlação a cada requisição (lido de `X-Request-ID`
+  se o cliente enviar um, senão gerado) — presente tanto no corpo quanto
+  no header `X-Request-ID` da resposta, em qualquer status.
+- `/health/live` e `/health/ready` (RAG-005) mantêm o próprio formato
+  (`{"status": ..., "checks": {...}}`) — são um contrato à parte, não
+  endpoints de negócio.
 
 ## CI (RAG-070)
 
@@ -262,6 +298,43 @@ Decisões e limites conhecidos desta atividade:
 - Enums do domínio (RAG-010) viram `VARCHAR + CHECK` no banco
   (`native_enum=False`), não um tipo `ENUM` nativo do Postgres — mais
   simples de alterar depois (adicionar um valor é só migrar o CHECK).
+
+## Armazenamento de objetos (RAG-020)
+
+`packages/application/ports/object_storage.py` define `ObjectStoragePort`
+(upload/download/delete) — casos de uso futuros (RAG-021+) dependem só
+dela, nunca de um SDK de storage concreto (seção 5.1 do plano). Dois
+adapters implementam a mesma porta:
+
+- `adapters/object_storage/s3_object_storage.py` (`S3ObjectStorage`):
+  implementação real, via `aioboto3`, contra o MinIO do `docker compose`
+  (RAG-003) — funciona igual contra um S3 de verdade, só o
+  `endpoint_url` muda.
+- `adapters/object_storage/in_memory.py` (`InMemoryObjectStorage`): fake
+  em memória para testes/desenvolvimento local, sem precisar de MinIO no
+  ar.
+
+Decisões desta atividade:
+
+- **Sanitização de key** (`sanitize_object_key`, no módulo da porta —
+  decidir o que é uma key segura independe de qual adapter a implementa):
+  normaliza unicode, remove segmentos de path traversal (`.`/`..`),
+  troca caracteres fora de `[\w.-]` por `_` e rejeita (`InvalidObjectKeyError`)
+  um nome que sanitize para vazio ou exceda 1024 bytes.
+- **Checksum**: `upload()` sempre devolve o SHA-256 calculado sobre os
+  bytes enviados (`StoredObject.checksum_sha256`) — quem chama compara
+  com o checksum esperado (ex.: `Document.checksum`, RAG-010) para
+  detectar corrupção; a porta em si não tem um checksum "esperado" para
+  validar sozinha.
+- **Exclusão idempotente**: `delete()` de uma key que não existe não é
+  erro (contrato da porta, refletido nos dois adapters).
+
+Validação: como não tenho um MinIO real acessível daqui, `S3ObjectStorage`
+é testado com o cliente `aioboto3` mockado (`tests/unit/test_object_storage_s3.py`)
+— prova que o adapter monta as chamadas certas e traduz `ClientError`
+(`NoSuchKey`) para `ObjectNotFoundError`, não que o MinIO/S3 real
+funciona. Confirme upload/download/delete de verdade com o compose no
+ar (RAG-003).
 
 ## Serviços locais (RAG-003)
 
