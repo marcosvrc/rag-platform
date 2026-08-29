@@ -16,6 +16,7 @@ Concluído até o momento:
   cobertura).
 - **RAG-003 — Criar Docker Compose local** (PostgreSQL/pgvector, Redis,
   MinIO e stack de observabilidade).
+- **RAG-004 — Implementar configuração da aplicação** (Pydantic Settings).
 
 ## Desenvolvimento local
 
@@ -32,13 +33,29 @@ make check      # lint + typecheck + test — o "pipeline" local completo
 ### Cobertura de testes
 
 `make test` sempre gera relatório de cobertura (`--cov-report=term-missing`
-e `coverage.xml`), mas o gate numérico (`fail_under`, ver
-`[tool.coverage.report]` em `pyproject.toml`) está deliberadamente em `0`
-por enquanto: `apps/`, `packages/` e `adapters/` ainda contêm apenas
-módulos vazios (0 statements), então qualquer percentual fixo seria
-artificial. O gate será elevado (baseline planejada: 85%) a partir da
-primeira atividade que introduzir código de aplicação real (RAG-010 em
-diante).
+e `coverage.xml`). O gate mínimo (`fail_under`, ver
+`[tool.coverage.report]` em `pyproject.toml`) ficou em `0` enquanto só
+havia módulos vazios (RAG-002) e foi elevado para **85%** em RAG-004,
+quando o primeiro código de aplicação real
+(`packages/config/settings.py`) passou a existir — hoje em 100% de
+cobertura.
+
+## Configuração da aplicação (RAG-004)
+
+Toda variável de ambiente da aplicação é lida e validada por
+`packages/config/settings.py`, via Pydantic Settings — nenhum outro
+módulo deve chamar `os.environ` diretamente. Ponto de entrada:
+`get_settings()` (cacheado por processo).
+
+- Campos com default (hosts, portas, nomes de banco) refletem os valores
+  do `docker-compose.yml` (RAG-003) quando a API/worker rodam no host.
+- Campos sem default (`POSTGRES_PASSWORD`, `MINIO_ROOT_PASSWORD`) são
+  obrigatórios: se ausentes — no ambiente ou em um `.env` — a aplicação
+  falha na inicialização com `ConfigurationError`, cuja mensagem cita
+  apenas o nome da variável faltante, nunca um valor.
+- Segredos usam `pydantic.SecretStr`: `repr(settings)`/`str(settings)`
+  sempre mostram `**********`, então mesmo um log ou `print` acidental
+  não expõe credenciais.
 
 ## Serviços locais (RAG-003)
 
