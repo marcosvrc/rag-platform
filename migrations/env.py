@@ -14,6 +14,11 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
+# `adapters.postgres.models` é importado por efeito colateral: registra
+# todas as tabelas do schema inicial (RAG-011) em Base.metadata antes do
+# Alembic ler target_metadata — autogenerate não veria nenhuma tabela
+# sem isso.
+import adapters.postgres.models  # noqa: F401
 from adapters.postgres.base import Base
 from packages.config.settings import get_settings
 

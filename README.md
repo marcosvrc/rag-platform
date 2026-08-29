@@ -25,6 +25,8 @@ Concluído até o momento:
   typecheck, testes, migrations e validação do OpenAPI).
 - **RAG-010 — Modelar entidades e estados** (entidades de domínio,
   máquina de estados de `Document`).
+- **RAG-011 — Criar schema inicial** (tabelas, constraints, FKs e
+  índices do modelo mínimo, migration 0002).
 
 ## Desenvolvimento local
 
@@ -182,6 +184,42 @@ Rodar só os testes de domínio:
 ```bash
 .venv/bin/pytest tests/unit/test_document.py tests/unit/test_domain_entities.py -q
 ```
+
+## Schema inicial (RAG-011)
+
+A migration `0002_create_core_schema` cria as 10 tabelas do modelo
+mínimo (uma por entidade de RAG-010), a partir dos modelos ORM em
+`adapters/postgres/models/` — modelos de persistência, não as entidades
+de domínio (que continuam sem depender de SQLAlemy/pgvector, seção 5.1
+do plano).
+
+```bash
+.venv/bin/alembic upgrade head        # com o compose (RAG-003) no ar
+.venv/bin/alembic upgrade head --sql  # gera o SQL sem se conectar a nada
+```
+
+Decisões e limites conhecidos desta atividade:
+
+- **Isolamento por tenant:** `knowledge_bases`, `chunks` e `query_logs`
+  carregam `tenant_id` diretamente (NOT NULL, FK, índice próprio — são
+  as únicas entidades de RAG-010 com esse campo). As demais tabelas
+  (`documents`, `document_versions`, `index_jobs`, `feedbacks`,
+  `query_evidences`) chegam até um tenant por join através de suas FKs.
+  `tests/unit/test_schema.py` verifica isso a nível de schema; um teste
+  de isolamento fim a fim contra um Postgres real fica para
+  `tests/integration/`.
+- **`chunks.embedding` não tem dimensão fixa ainda**: o modelo/alias de
+  embeddings só é escolhido em RAG-025, e um índice pgvector (ivfflat/
+  hnsw) exige uma dimensão fixa para existir. Por isso RAG-011 não cria
+  esse índice — isso é RAG-030 ("usa índice pgvector"). Pelo mesmo
+  motivo, a busca lexical (RAG-031, "índice GIN utilizado") também não
+  ganha aqui uma coluna `tsvector`/índice GIN.
+- `documents.active_version_id` e `document_versions.document_id` se
+  referenciam mutuamente; a FK circular usa `use_alter=True` (ver
+  comentário em `adapters/postgres/models/document.py`).
+- Enums do domínio (RAG-010) viram `VARCHAR + CHECK` no banco
+  (`native_enum=False`), não um tipo `ENUM` nativo do Postgres — mais
+  simples de alterar depois (adicionar um valor é só migrar o CHECK).
 
 ## Serviços locais (RAG-003)
 
