@@ -421,3 +421,50 @@ neste momento a imagem apenas a disponibiliza, sem criá-la.
 A validação de configuração completa da aplicação (Pydantic Settings) é
 entregue em RAG-004; a API e os workers que efetivamente usam estes
 serviços chegam a partir de RAG-005.
+
+## Autenticação JWT (RAG-050)
+
+`packages/application/ports/token_verifier.py` define `TokenVerifierPort`
+(`verify(token) -> TokenClaims`) — casos de uso e a API dependem só dela,
+nunca de PyJWT ou de um SDK de IdP concreto (seção 5.1 do plano).
+`adapters/token_verifier/pyjwt_verifier.py` (`PyJWTTokenVerifier`) é a
+implementação via PyJWT: valida assinatura, issuer, audience e
+expiração (com tolerância de relógio configurável, `JWT_LEEWAY_SECONDS`)
+e extrai `subject`/`tenant_id`/`issuer`/`expires_at`; qualquer falha
+vira `AuthenticationError` (RAG-013) com um detalhe genérico — nunca diz
+*por que* o token falhou, para não dar a um atacante um oráculo.
+
+Configuração (`packages/config/settings.py`, `.env.example`):
+`JWT_ALGORITHM` (padrão `HS256`), `JWT_SECRET` (obrigatório para
+algoritmos `HS*`), `JWT_PUBLIC_KEY` (obrigatório para `RS*`/`ES*`/`PS*`),
+`JWT_ISSUER` e `JWT_AUDIENCE` (obrigatórios, sem default — como as
+senhas de RAG-004, forçam configuração explícita em vez de um valor
+"que sempre funciona").
+
+**Modo local simulado** (seção 13 do plano: "em modo local, provedor de
+identidade simulado e explicitamente identificado como não produtivo"):
+não há OIDC real, apenas um segredo compartilhado (`JWT_SECRET`,
+HS256) configurado via `.env`. `scripts/mint_local_dev_token.py` gera
+tokens válidos para testar a API localmente:
+
+```bash
+python scripts/mint_local_dev_token.py --subject dev-user \
+    --tenant-id 11111111-1111-1111-1111-111111111111
+```
+
+Nunca reutilize `JWT_SECRET`/`JWT_ISSUER` de desenvolvimento em
+development ou production — lá, use um algoritmo assimétrico
+(`JWT_ALGORITHM=RS256` + `JWT_PUBLIC_KEY` da chave pública do IdP real)
+com o segredo gerenciado por secret manager.
+
+Esta atividade só entrega a verificação do token (assinatura, issuer,
+audience, expiração — critério de aceite desta atividade). A troca de
+`apps/api/dependencies.py::get_current_tenant_id` do cabeçalho
+`X-Tenant-Id` provisório (RAG-012) para resolver o tenant a partir de um
+token verificado, e a prova de ausência de vazamento entre tenants, são
+RAG-051.
+
+Testes: `tests/unit/test_token_verifier.py` (assinatura errada, issuer/
+audience errados, expiração, leeway, claims obrigatórias ausentes,
+`tenant_id` malformado, confusão de algoritmo, erros de configuração) e
+`tests/unit/test_mint_local_dev_token.py`.

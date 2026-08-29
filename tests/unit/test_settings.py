@@ -47,9 +47,25 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
         "MINIO_ROOT_USER",
         "MINIO_ROOT_PASSWORD",
         "MINIO_USE_SSL",
+        "JWT_ALGORITHM",
+        "JWT_SECRET",
+        "JWT_PUBLIC_KEY",
+        "JWT_ISSUER",
+        "JWT_AUDIENCE",
+        "JWT_LEEWAY_SECONDS",
     ):
         monkeypatch.delenv(name, raising=False)
     return monkeypatch
+
+
+def _set_required_secrets(env: pytest.MonkeyPatch) -> None:
+    """Preenche todo campo obrigatório (sem default) de `Settings` com um
+    valor de teste — usado pelos testes que não são sobre *ausência* de
+    configuração, para que só a variável que o teste quer exercitar mude."""
+    env.setenv("POSTGRES_PASSWORD", "s3cr3t-should-not-leak")
+    env.setenv("MINIO_ROOT_PASSWORD", "another-secret-should-not-leak")
+    env.setenv("JWT_ISSUER", "rag-platform-local")
+    env.setenv("JWT_AUDIENCE", "rag-platform-api")
 
 
 def test_missing_required_secrets_raises_configuration_error(
@@ -70,8 +86,7 @@ def test_configuration_error_never_leaks_a_provided_value(
     """Mesmo com um valor inválido fornecido, a mensagem de erro não deve
     ecoar esse valor de volta (apenas o nome do campo problemático)."""
     clean_env.setenv("POSTGRES_PORT", "not-a-port-number")
-    clean_env.setenv("POSTGRES_PASSWORD", "s3cr3t-should-not-leak")
-    clean_env.setenv("MINIO_ROOT_PASSWORD", "another-secret-should-not-leak")
+    _set_required_secrets(clean_env)
 
     with pytest.raises(ConfigurationError) as exc_info:
         load_settings(env_file=None)
@@ -84,8 +99,7 @@ def test_configuration_error_never_leaks_a_provided_value(
 def test_settings_loads_with_required_secrets_and_masks_them_in_repr(
     clean_env: pytest.MonkeyPatch,
 ) -> None:
-    clean_env.setenv("POSTGRES_PASSWORD", "s3cr3t-should-not-leak")
-    clean_env.setenv("MINIO_ROOT_PASSWORD", "another-secret-should-not-leak")
+    _set_required_secrets(clean_env)
 
     settings = load_settings(env_file=None)
 
@@ -101,8 +115,7 @@ def test_settings_loads_with_required_secrets_and_masks_them_in_repr(
 def test_computed_urls_use_the_real_secret_value(
     clean_env: pytest.MonkeyPatch,
 ) -> None:
-    clean_env.setenv("POSTGRES_PASSWORD", "s3cr3t-should-not-leak")
-    clean_env.setenv("MINIO_ROOT_PASSWORD", "another-secret-should-not-leak")
+    _set_required_secrets(clean_env)
 
     settings = load_settings(env_file=None)
 
@@ -117,8 +130,7 @@ def test_computed_urls_use_the_real_secret_value(
 def test_minio_endpoint_url_uses_https_when_ssl_is_enabled(
     clean_env: pytest.MonkeyPatch,
 ) -> None:
-    clean_env.setenv("POSTGRES_PASSWORD", "s3cr3t-should-not-leak")
-    clean_env.setenv("MINIO_ROOT_PASSWORD", "another-secret-should-not-leak")
+    _set_required_secrets(clean_env)
     clean_env.setenv("MINIO_USE_SSL", "true")
 
     settings = load_settings(env_file=None)
@@ -129,8 +141,7 @@ def test_minio_endpoint_url_uses_https_when_ssl_is_enabled(
 def test_get_settings_is_cached_per_process(
     clean_env: pytest.MonkeyPatch,
 ) -> None:
-    clean_env.setenv("POSTGRES_PASSWORD", "s3cr3t-should-not-leak")
-    clean_env.setenv("MINIO_ROOT_PASSWORD", "another-secret-should-not-leak")
+    _set_required_secrets(clean_env)
     # get_settings() usa load_settings(), que por padrão também tentaria ler
     # um .env do diretório atual; como não há um no ambiente de testes,
     # basta que as variáveis de ambiente acima já sejam suficientes.
@@ -139,3 +150,48 @@ def test_get_settings_is_cached_per_process(
     second = get_settings()
 
     assert first is second
+
+
+def test_missing_jwt_issuer_and_audience_raises_configuration_error(
+    clean_env: pytest.MonkeyPatch,
+) -> None:
+    # RAG-050: assim como as senhas, issuer/audience são obrigatórios mesmo
+    # em modo local — nenhum default "que sempre funciona".
+    clean_env.setenv("POSTGRES_PASSWORD", "s3cr3t-should-not-leak")
+    clean_env.setenv("MINIO_ROOT_PASSWORD", "another-secret-should-not-leak")
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        load_settings(env_file=None)
+
+    message = str(exc_info.value).lower()
+    assert "jwt_issuer" in message
+    assert "jwt_audience" in message
+
+
+def test_jwt_settings_default_algorithm_and_leeway(
+    clean_env: pytest.MonkeyPatch,
+) -> None:
+    _set_required_secrets(clean_env)
+
+    settings = load_settings(env_file=None)
+
+    assert settings.jwt_algorithm == "HS256"
+    assert settings.jwt_secret is None
+    assert settings.jwt_public_key is None
+    assert settings.jwt_issuer == "rag-platform-local"
+    assert settings.jwt_audience == "rag-platform-api"
+    assert settings.jwt_leeway_seconds == 10
+
+
+def test_jwt_secret_is_masked_like_other_secrets(
+    clean_env: pytest.MonkeyPatch,
+) -> None:
+    _set_required_secrets(clean_env)
+    clean_env.setenv("JWT_SECRET", "jwt-secret-should-not-leak")
+
+    settings = load_settings(env_file=None)
+
+    assert settings.jwt_secret is not None
+    assert settings.jwt_secret.get_secret_value() == "jwt-secret-should-not-leak"
+    rendered = f"{settings!r} {settings}"
+    assert "jwt-secret-should-not-leak" not in rendered
