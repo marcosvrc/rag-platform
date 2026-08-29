@@ -58,10 +58,15 @@ def upgrade() -> None:
             name="fk_document_idempotency_keys_document_id_documents",
             ondelete="CASCADE",
         ),
+        # Nome sem o "_id" (66 -> 63 caracteres): o Postgres trunca
+        # identificadores de mais de 63 bytes, e o SQLAlchemy recusa
+        # (IdentifierError) um nome explicito que ja nasca acima
+        # desse limite em vez de truncar silenciosamente por conta
+        # propria.
         sa.ForeignKeyConstraint(
             ["document_version_id"],
             ["document_versions.id"],
-            name="fk_document_idempotency_keys_document_version_id_document_versions",
+            name="fk_document_idempotency_keys_document_version_document_versions",
             ondelete="CASCADE",
         ),
         sa.ForeignKeyConstraint(
