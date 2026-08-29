@@ -102,13 +102,19 @@ jobs:
           .venv/bin/pip install -e ".[dev]"
 
       # `--sql` força o modo offline do Alembic (gera o SQL das
-      # migrations sem se conectar a um banco real) — as credenciais
-      # abaixo são fictícias, exigidas só porque Settings valida a
-      # presença das variáveis obrigatórias antes de montar a URL.
+      # migrations sem se conectar a um banco real) — as credenciais e
+      # os campos de JWT abaixo são fictícios, exigidos só porque
+      # Settings valida a presença de TODAS as variáveis obrigatórias
+      # (RAG-004) antes de montar a URL do banco, mesmo as que este job
+      # nunca usa de verdade (JWT_ISSUER/JWT_AUDIENCE, obrigatórias
+      # desde o RAG-050) — sem eles, get_settings() levanta
+      # ConfigurationError e o job falha antes de gerar o SQL.
       - name: alembic upgrade head --sql
         env:
           POSTGRES_PASSWORD: "ci-placeholder"
           MINIO_ROOT_PASSWORD: "ci-placeholder"
+          JWT_ISSUER: "ci-placeholder"
+          JWT_AUDIENCE: "ci-placeholder"
         run: .venv/bin/alembic upgrade head --sql > /dev/null
 
   test:
