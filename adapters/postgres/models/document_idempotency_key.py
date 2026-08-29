@@ -52,9 +52,11 @@ class DocumentIdempotencyKeyModel(Base):
         nullable=False,
     )
     document_version_id: Mapped[UUID] = mapped_column(
+        # Nome sem o "_id" (66 -> 63 caracteres) para caber no limite
+        # de identificador do Postgres — ver migrations/versions/0003.
         ForeignKey(
             "document_versions.id",
-            name="fk_document_idempotency_keys_document_version_id_document_versions",
+            name="fk_document_idempotency_keys_document_version_document_versions",
             ondelete="CASCADE",
         ),
         nullable=False,
