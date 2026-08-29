@@ -17,6 +17,8 @@ Concluído até o momento:
 - **RAG-003 — Criar Docker Compose local** (PostgreSQL/pgvector, Redis,
   MinIO e stack de observabilidade).
 - **RAG-004 — Implementar configuração da aplicação** (Pydantic Settings).
+- **RAG-006 — Configurar banco e migrations** (SQLAlchemy async + Alembic
+  + extensão pgvector).
 
 ## Desenvolvimento local
 
@@ -56,6 +58,29 @@ módulo deve chamar `os.environ` diretamente. Ponto de entrada:
 - Segredos usam `pydantic.SecretStr`: `repr(settings)`/`str(settings)`
   sempre mostram `**********`, então mesmo um log ou `print` acidental
   não expõe credenciais.
+
+## Banco de dados e migrations (RAG-006)
+
+Com o PostgreSQL do `docker compose` (RAG-003) no ar e um `.env` válido
+(RAG-004):
+
+```bash
+.venv/bin/alembic upgrade head    # aplica todas as migrations pendentes
+.venv/bin/alembic downgrade -1    # desfaz a última
+.venv/bin/alembic current         # mostra a revisão atual
+```
+
+A primeira migration (`0001`) apenas habilita a extensão `vector`
+(`CREATE EXTENSION IF NOT EXISTS vector`) — as tabelas do modelo mínimo
+(seção 9 do plano) são criadas em RAG-011. A URL de conexão nunca é
+hardcoded em `alembic.ini`: `migrations/env.py` a monta a partir de
+`packages/config/settings.py` (RAG-004), usando o mesmo engine
+assíncrono (`asyncpg`) que a aplicação. `adapters/postgres/engine.py`
+expõe `get_engine()`/`get_session_factory()`/`get_session()`
+(cacheados por processo), consumidos pela aplicação a partir de RAG-012.
+
+Para gerar o SQL das migrations sem se conectar a um banco (útil para
+revisão em PR): `.venv/bin/alembic upgrade head --sql`.
 
 ## Serviços locais (RAG-003)
 
