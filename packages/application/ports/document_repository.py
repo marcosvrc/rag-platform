@@ -24,6 +24,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from uuid import UUID
 
+from packages.domain.entities.chunk import Chunk
 from packages.domain.entities.document import Document
 from packages.domain.entities.document_version import DocumentVersion
 from packages.domain.entities.index_job import IndexJob
@@ -134,6 +135,65 @@ class DocumentRepositoryPort(ABC):
     @abstractmethod
     async def mark_index_job_succeeded(self, *, index_job_id: UUID) -> None:
         """Marca `index_job_id` como `SUCCEEDED`."""
+
+    @abstractmethod
+    async def get_index_job(self, *, index_job_id: UUID) -> IndexJob | None:
+        """`IndexJob` por id, sem filtro de tenant — mesmo contexto
+        interno do worker que `claim_index_job` (a mensagem da fila
+        carrega só o id do job; o worker resolve `document_id` a partir
+        daqui antes de conseguir qualquer contexto de tenant)."""
+
+    @abstractmethod
+    async def get_document(self, *, document_id: UUID) -> Document | None:
+        """`Document` por id, sem filtro de tenant (RAG-026) — mesma
+        justificativa de `get_index_job`: o worker só tem `document_id`
+        (via `IndexJob`) neste ponto, ainda não um tenant autenticado.
+        Nunca expor isto a um tenant diretamente (isso é RAG-027, que
+        faz o isolamento na hora de expor status ao cliente)."""
+
+    @abstractmethod
+    async def get_latest_version(self, *, document_id: UUID) -> DocumentVersion | None:
+        """A `DocumentVersion` de maior `version` para este documento
+        (RAG-026) — o job de indexação sempre processa a versão mais
+        recente; `IndexJob` não carrega `version_id` porque job e
+        versão são sempre criados juntos (RAG-021 para a versão 1;
+        RAG-027 criará ambos juntos numa reindexação), então "a versão
+        mais recente" nunca é ambíguo no momento em que um job roda."""
+
+    @abstractmethod
+    async def mark_document_processing(self, *, document_id: UUID) -> None:
+        """Transiciona `Document.status` para `PROCESSING` (RAG-026) —
+        idempotente: não faz nada se já estiver em `PROCESSING` (uma
+        tentativa retentada do mesmo job não deve falhar tentando essa
+        transição de novo; `Document.transition_to` rejeitaria
+        PROCESSING -> PROCESSING como um self-loop não listado no
+        diagrama de estados, seção 9.1 do plano)."""
+
+    @abstractmethod
+    async def persist_chunks_and_activate_version(
+        self,
+        *,
+        document_id: UUID,
+        version_id: UUID,
+        extracted_object_key: str,
+        chunks: list[Chunk],
+    ) -> None:
+        """Substitui todos os chunks de `version_id` por `chunks`,
+        grava `extracted_object_key` na versão e ativa essa versão
+        (`Document.active_version_id=version_id`,
+        `status=INDEXED`) — tudo numa única transação (RAG-026,
+        passos 12-13 do plano).
+
+        Atômico: se qualquer parte falhar, nada é persistido — a
+        versão ativa anterior (se houver) permanece inalterada e
+        consultável até este método terminar com sucesso (critério de
+        aceite "índice parcial nunca fica ativo" e "versão anterior
+        permanece consultável até a troca").
+
+        Idempotente: chamar de novo para a mesma `version_id`
+        (reprocessamento do mesmo job) substitui os chunks anteriores
+        dela, nunca os duplica (critério de aceite "reprocessamento é
+        idempotente") — nunca toca em chunks de outra `version_id`."""
 
     @abstractmethod
     async def mark_index_job_failed(

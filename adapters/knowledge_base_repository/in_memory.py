@@ -82,6 +82,9 @@ class InMemoryKnowledgeBaseRepository(KnowledgeBaseRepositoryPort):
             return None
         return knowledge_base
 
+    async def get_by_id_unscoped(self, *, knowledge_base_id: UUID) -> KnowledgeBase | None:
+        return self._by_id.get(knowledge_base_id)
+
     async def list_by_tenant(
         self, *, tenant_id: UUID, limit: int, cursor: str | None
     ) -> KnowledgeBasePage:

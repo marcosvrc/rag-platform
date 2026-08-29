@@ -808,3 +808,77 @@ divergente, e header de autorização quando `LITELLM_API_KEY` está
 configurado — tudo via `httpx.MockTransport`, sem chamar um serviço
 real. `tests/unit/test_model_config.py` cobre o carregador de alias
 (mesmos critérios de `test_prompts.py`).
+
+## Persistência de chunks e ativação de versão (RAG-026)
+
+Implementa os passos 8-14 do fluxo de indexação (seção 11 do plano):
+extração, chunking, embeddings, persistência e ativação de versão,
+tudo orquestrado por um único adapter real de `DocumentProcessorPort`
+(RAG-022) — antes disso, `NotImplementedDocumentProcessor` fazia todo
+`IndexJob` reivindicado falhar definitivamente de propósito.
+
+`adapters/document_processor/pipeline.py` (`PipelineDocumentProcessor`)
+não faz nenhuma extração/chunking/embeddings por conta própria: só
+resolve `IndexJob` -> `Document` -> `DocumentVersion` mais recente ->
+`KnowledgeBase`, chama o `DocumentParserPort` (RAG-023), a função pura
+`chunk_document` (RAG-024, não é um port), o `EmbeddingProviderPort`
+(RAG-025) e, por fim, persiste tudo via os métodos novos de
+`DocumentRepositoryPort` desta atividade.
+
+**Métodos novos em `DocumentRepositoryPort`** (todos sem filtro de
+tenant — o worker resolve um `Document`/`KnowledgeBase` a partir de um
+`document_id`/`index_job_id` isolado, antes de ter qualquer tenant
+autenticado em mãos; mesma justificativa já usada por
+`claim_index_job` no RAG-022):
+- `get_index_job`, `get_document`, `get_latest_version`: leituras
+  simples que o pipeline precisa para montar seu contexto.
+- `mark_document_processing`: transiciona `Document.status` para
+  `PROCESSING`, idempotente via guarda a nível de SQL
+  (`WHERE status != PROCESSING`) — `Document.transition_to` rejeitaria
+  `PROCESSING -> PROCESSING` como um self-loop não listado na máquina
+  de estados (`packages/domain/entities/document.py`), e um
+  reprocessamento (retry de job, ou reindexação futura do RAG-027)
+  não pode falhar só por já estar em `PROCESSING`.
+- `persist_chunks_and_activate_version`: substitui todos os chunks de
+  uma `version_id` pelos novos, grava `extracted_object_key` e ativa a
+  versão (`Document.active_version_id`, `status=INDEXED`) — tudo numa
+  única transação/commit. Índice parcial nunca fica ativo (se qualquer
+  passo do pipeline falhar antes deste método, nada muda no banco, e a
+  versão ativa anterior — se houver — continua sendo a consultável).
+  A estratégia é DELETE + INSERT (nunca diff): reprocessar a mesma
+  `version_id` nunca duplica chunks, só substitui o conjunto inteiro.
+
+Em `KnowledgeBaseRepositoryPort`, `get_by_id_unscoped` é a mesma
+exceção deliberada, aplicada à base de conhecimento: o worker só
+conhece `Document.knowledge_base_id`, nunca um tenant autenticado, e
+precisa do `tenant_id`/`config` da base para montar os chunks e a
+config de chunking. Nunca é exposto a um tenant diretamente — todo
+caminho autenticado continua usando `get_by_id`.
+
+**O que fica de fora desta atividade, deliberadamente**: se todas as
+tentativas de um `IndexJob` se esgotarem (falha definitiva,
+`packages/application/commands/index_job.py::process_index_job_attempt`,
+já implementado e mesclado no RAG-022), o `Document` correspondente NÃO
+é transicionado para `FAILED` — ele fica preso em `PROCESSING` (ou
+`PENDING`, se a falha ocorrer antes do passo 2 do pipeline). Fechar essa
+lacuna exigiria alterar `process_index_job_attempt` para propagar
+`document_id` até o ponto onde a falha definitiva é decidida (hoje só
+`index_job_id` está em escopo ali) — uma mudança em código já revisado
+e mesclado antes desta atividade, feita sem o autor disponível para
+revisar. Ficou registrado aqui como um follow-up conhecido em vez de
+mudado silenciosamente; `IndexJob.status=FAILED` já é visível o
+suficiente para um operador humano perceber e investigar o documento
+travado enquanto isso não é resolvido.
+
+Testes: `tests/unit/test_document_repository_in_memory.py` (classe
+`TestRag026PersistChunksAndActivateVersion`) cobre os 5 métodos novos
+de `DocumentRepositoryPort` contra o fake em memória — idempotência de
+`mark_document_processing`, ativação atômica de versão, e
+reprocessamento sem duplicar chunks.
+`tests/unit/test_knowledge_base_in_memory_repository.py` cobre
+`get_by_id_unscoped` (incluindo bases já excluídas — o método nunca
+filtra por status). `tests/unit/test_pipeline_document_processor.py`
+cobre a orquestração completa do `PipelineDocumentProcessor` com fakes
+para as 5 portas: pipeline de ponta a ponta com sucesso, reprocessamento
+idempotente, e os três casos defensivos (job sumido, documento sem
+versão, base de conhecimento ausente).

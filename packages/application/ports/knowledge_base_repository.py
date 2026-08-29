@@ -67,6 +67,17 @@ class KnowledgeBaseRepositoryPort(ABC):
         pertencer a outro tenant."""
 
     @abstractmethod
+    async def get_by_id_unscoped(self, *, knowledge_base_id: UUID) -> KnowledgeBase | None:
+        """`KnowledgeBase` por id, SEM filtro de tenant (RAG-026) —
+        exceção deliberada à regra da classe: só para o contexto interno
+        do worker de indexação, que resolve uma base a partir de
+        `Document.knowledge_base_id` antes de conhecer qualquer tenant
+        autenticado (mesma justificativa de `DocumentRepositoryPort.
+        get_document`). `None` só se a base não existir mais (nunca
+        filtra por status/tenant). Nunca expor isto a um tenant
+        diretamente — todo caminho autenticado usa `get_by_id`."""
+
+    @abstractmethod
     async def list_by_tenant(
         self, *, tenant_id: UUID, limit: int, cursor: str | None
     ) -> KnowledgeBasePage:
