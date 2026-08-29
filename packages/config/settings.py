@@ -67,6 +67,14 @@ class Settings(BaseSettings):
     minio_use_ssl: bool = Field(default=False, alias="MINIO_USE_SSL")
     minio_bucket: str = Field(default="rag-platform", alias="MINIO_BUCKET")
 
+    # Upload de documentos (RAG-021). Tamanho máximo configurável (seção
+    # 13 do plano: "arquivos devem ser validados e ter tamanho máximo
+    # configurável"); os tipos aceitos (PDF, Markdown, TXT, DOCX — seção
+    # 2 e RAG-023) não são configuráveis por ambiente, são uma decisão
+    # de produto, então ficam fixos em
+    # `packages/application/commands/document.py`, não aqui.
+    document_max_size_bytes: int = Field(default=52_428_800, alias="DOCUMENT_MAX_SIZE_BYTES")
+
     @property
     def database_url(self) -> str:
         """DSN assíncrono do SQLAlchemy (driver `asyncpg`, ver RAG-006)."""
