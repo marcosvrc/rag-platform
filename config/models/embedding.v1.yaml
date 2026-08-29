@@ -1,0 +1,10 @@
+# Alias de embeddings resolvido pelo gateway LiteLLM (RAG-025).
+#
+# Uma versão publicada é imutável (seção 8 do plano) — trocar o modelo
+# por trás deste alias é uma mudança de CONFIGURAÇÃO no gateway
+# LiteLLM, não deste arquivo; uma mudança que precise de um alias novo
+# (ex.: dimensão de vetor diferente) cria embedding.v2.yaml, nunca edita
+# este.
+id: embedding
+version: v1
+alias: embedding-model-alias

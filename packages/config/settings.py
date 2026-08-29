@@ -93,6 +93,18 @@ class Settings(BaseSettings):
     jwt_audience: str = Field(alias="JWT_AUDIENCE")
     jwt_leeway_seconds: int = Field(default=10, alias="JWT_LEEWAY_SECONDS")
 
+    # Gateway de embeddings/geração LiteLLM (RAG-025). Só o cliente
+    # existe até aqui — nenhum proxy LiteLLM real é provisionado pelo
+    # docker-compose.yml ainda (ver adapters/litellm/embedding_provider.py
+    # sobre por que isso ficou fora desta atividade). `litellm_api_key`
+    # é opcional porque um proxy local de desenvolvimento pode não exigir
+    # autenticação; nunca deixar de configurá-lo em development/production.
+    litellm_base_url: str = Field(default="http://localhost:4000", alias="LITELLM_BASE_URL")
+    litellm_api_key: SecretStr | None = Field(default=None, alias="LITELLM_API_KEY")
+    litellm_timeout_seconds: float = Field(default=30.0, alias="LITELLM_TIMEOUT_SECONDS")
+    litellm_max_retries: int = Field(default=3, alias="LITELLM_MAX_RETRIES")
+    litellm_embedding_batch_size: int = Field(default=100, alias="LITELLM_EMBEDDING_BATCH_SIZE")
+
     @property
     def database_url(self) -> str:
         """DSN assíncrono do SQLAlchemy (driver `asyncpg`, ver RAG-006)."""
