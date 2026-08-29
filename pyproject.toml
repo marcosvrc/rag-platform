@@ -92,6 +92,8 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = "scripts.*"
 disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
 # aioboto3/aiobotocore/botocore não publicam stubs nem py.typed (RAG-020).
 module = ["aioboto3.*", "botocore.*"]
 ignore_missing_imports = true
