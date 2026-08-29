@@ -459,3 +459,85 @@ Testes: `tests/unit/test_document_repository_in_memory.py` (contrato
 da porta), `tests/unit/test_document_upload_command.py` (validação,
 duplicidade, idempotência) e `tests/unit/test_document_router.py`
 (visão HTTP, isolamento por tenant).
+## Autenticação JWT (RAG-050)
+
+`packages/application/ports/token_verifier.py` define `TokenVerifierPort`
+(`verify(token) -> TokenClaims`) — casos de uso e a API dependem só dela,
+nunca de PyJWT ou de um SDK de IdP concreto (seção 5.1 do plano).
+`adapters/token_verifier/pyjwt_verifier.py` (`PyJWTTokenVerifier`) é a
+implementação via PyJWT: valida assinatura, issuer, audience e
+expiração (com tolerância de relógio configurável, `JWT_LEEWAY_SECONDS`)
+e extrai `subject`/`tenant_id`/`issuer`/`expires_at`; qualquer falha
+vira `AuthenticationError` (RAG-013) com um detalhe genérico — nunca diz
+*por que* o token falhou, para não dar a um atacante um oráculo.
+
+Configuração (`packages/config/settings.py`, `.env.example`):
+`JWT_ALGORITHM` (padrão `HS256`), `JWT_SECRET` (obrigatório para
+algoritmos `HS*`), `JWT_PUBLIC_KEY` (obrigatório para `RS*`/`ES*`/`PS*`),
+`JWT_ISSUER` e `JWT_AUDIENCE` (obrigatórios, sem default — como as
+senhas de RAG-004, forçam configuração explícita em vez de um valor
+"que sempre funciona").
+
+**Modo local simulado** (seção 13 do plano: "em modo local, provedor de
+identidade simulado e explicitamente identificado como não produtivo"):
+não há OIDC real, apenas um segredo compartilhado (`JWT_SECRET`,
+HS256) configurado via `.env`. `scripts/mint_local_dev_token.py` gera
+tokens válidos para testar a API localmente:
+
+```bash
+python scripts/mint_local_dev_token.py --subject dev-user \
+    --tenant-id 11111111-1111-1111-1111-111111111111
+```
+
+Nunca reutilize `JWT_SECRET`/`JWT_ISSUER` de desenvolvimento em
+development ou production — lá, use um algoritmo assimétrico
+(`JWT_ALGORITHM=RS256` + `JWT_PUBLIC_KEY` da chave pública do IdP real)
+com o segredo gerenciado por secret manager.
+
+Esta atividade só entrega a verificação do token (assinatura, issuer,
+audience, expiração — critério de aceite desta atividade). A troca de
+`apps/api/dependencies.py::get_current_tenant_id` do cabeçalho
+`X-Tenant-Id` provisório (RAG-012) para resolver o tenant a partir de um
+token verificado, e a prova de ausência de vazamento entre tenants, são
+RAG-051.
+
+Testes: `tests/unit/test_token_verifier.py` (assinatura errada, issuer/
+audience errados, expiração, leeway, claims obrigatórias ausentes,
+`tenant_id` malformado, confusão de algoritmo, erros de configuração) e
+`tests/unit/test_mint_local_dev_token.py`.
+## Prompt de resposta (RAG-040)
+
+`config/prompts/answer.v1.yaml` é o prompt de resposta fundamentada,
+versionado por convenção (seção 8 do plano): uma versão publicada é
+imutável, uma mudança de conteúdo sempre cria `answer.v2.yaml`, nunca
+edita a existente. `packages/generation/prompts.py::load_prompt(id,
+version)` carrega e valida esse YAML — nada aqui assume "a versão
+atual" implicitamente, todo carregamento pede `id`/`version`
+explícitos; `get_default_answer_prompt()` é o único lugar que decide
+qual versão a aplicação usa hoje.
+
+O prompt é estruturado em campos, não um texto livre único, para que os
+requisitos de aceite sejam verificáveis independentemente:
+
+- `system_template`: instrução geral (responder só com base no
+  contexto fornecido).
+- `untrusted_context_notice`: declara que o conteúdo recuperado é dado,
+  não instrução — qualquer comando embutido nos documentos deve ser
+  ignorado (requisito de segurança da seção 13: conteúdo recuperado
+  nunca deve ser tratado como instrução).
+- `citation_instruction`: exige citação do `chunk_id` para toda
+  afirmação relevante.
+- `no_evidence_response`: resposta fixa para quando não há evidência
+  suficiente (seção 12.1) — nunca inventar uma resposta.
+
+`PromptTemplate` (Pydantic, `frozen=True`) valida que nenhum desses
+campos é vazio e que `id`/`version` internos do YAML batem com o nome
+do arquivo. `render(context, question)` só concatena essas partes —
+seleção/priorização de evidência por orçamento de tokens (RAG-041) e a
+chamada ao modelo (RAG-042) são responsabilidade de atividades
+seguintes.
+
+Testes: `tests/unit/test_prompts.py` cobre carregamento do `answer.v1`
+real, os três requisitos de aceite acima, erro (`PromptNotFoundError`)
+para id/versão inexistente, erro de inconsistência id/versão-vs-nome-de-arquivo,
+cache por `(id, version)` e imutabilidade.

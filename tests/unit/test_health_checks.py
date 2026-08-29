@@ -22,6 +22,8 @@ def fake_settings() -> Settings:
         _env_file=None,  # type: ignore[call-arg]
         POSTGRES_PASSWORD=SecretStr("fake-postgres-password"),
         MINIO_ROOT_PASSWORD=SecretStr("fake-minio-password"),
+        JWT_ISSUER="rag-platform-tests",
+        JWT_AUDIENCE="rag-platform-tests-api",
     )
 
 

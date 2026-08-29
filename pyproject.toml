@@ -24,6 +24,9 @@ dependencies = [
     # RAG-021 — FastAPI exige isso para parsear multipart/form-data
     # (upload de arquivos via UploadFile).
     "python-multipart>=0.0.9,<1.0",
+    # RAG-040 — carregamento de prompts versionados (config/prompts/*.yaml)
+    # em runtime, não só em ferramentas de dev/CI.
+    "pyyaml>=6.0,<7.0",
 ]
 
 [project.optional-dependencies]
@@ -39,7 +42,6 @@ dev = [
     # diretamente no workflow, não pacotes Python.
     "bandit>=1.9,<2.0",
     "pip-audit>=2.9,<3.0",
-    "pyyaml>=6.0,<7.0",
     "types-PyYAML>=6.0,<7.0",
 ]
 
