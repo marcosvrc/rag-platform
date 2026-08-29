@@ -177,3 +177,24 @@ def test_chunk_embedding_column_has_no_fixed_dimension_yet() -> None:
 
     assert isinstance(embedding_type, Vector)
     assert embedding_type.dim is None
+
+
+def test_chunks_content_tsv_has_a_gin_index() -> None:
+    """RAG-031 (migration 0004): `content_tsv` é uma coluna gerada
+    (`Computed`) com um índice GIN — o que faz a busca lexical usar o
+    índice em vez de fazer table scan (critério de aceite "índice GIN
+    utilizado")."""
+    chunks = Base.metadata.tables["chunks"]
+    content_tsv = chunks.columns["content_tsv"]
+
+    assert content_tsv.computed is not None
+
+    gin_indexes = [
+        index
+        for index in chunks.indexes
+        if index.name == "ix_chunks_content_tsv"
+        and index.dialect_options["postgresql"]["using"] == "gin"
+    ]
+    assert len(gin_indexes) == 1
+    (gin_index,) = gin_indexes
+    assert {col.name for col in gin_index.columns} == {"content_tsv"}
