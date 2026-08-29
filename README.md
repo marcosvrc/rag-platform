@@ -752,3 +752,59 @@ determinismo, validação de `ChunkingConfig`, `from_knowledge_base_config`,
 o fallback por tokens (com verificação de sobreposição exata entre
 pedaços consecutivos) e a fusão por mínimo sem duplicar a sobreposição
 (inclusive com `chunk_overlap=0`).
+
+## Embeddings via LiteLLM (RAG-025)
+
+Implementa o passo 11 do fluxo de indexação (seção 11 do plano):
+"gerar embeddings em lotes". Persistência e ativação de versão (passos
+12-14) continuam sem implementação — RAG-026/027.
+
+`packages/application/ports/embedding_provider.py` define
+`EmbeddingProviderPort` (`embed(texts) -> list[list[float]]`, uma
+embedding por texto, preservando a ordem) — domínio e casos de uso não
+importam LiteLLM nem `httpx` diretamente. Erros são categorizados:
+`EmbeddingTimeoutError` (timeout em todas as tentativas) e
+`EmbeddingProviderUnavailableError` (qualquer outro erro do gateway —
+HTTP >= 500, erro de conexão, corpo malformado, contagem de embeddings
+divergente da de textos enviados — depois de esgotar as tentativas).
+
+`adapters/litellm/embedding_provider.py` (`LiteLLMEmbeddingProvider`)
+fala com o gateway LiteLLM (seção 5 do plano: "AI Gateway: LiteLLM")
+por HTTP simples (`POST {base_url}/embeddings`, API compatível com
+OpenAI que o LiteLLM expõe em modo proxy) usando `httpx` — não a SDK
+Python `litellm`, que rotearia para provedores diretamente e
+duplicaria o papel do gateway, reintroduzindo o tipo de dependência
+pesada já evitada em RAG-023/024. Timeout por tentativa e retry com
+backoff exponencial são configuráveis (`Settings.litellm_timeout_seconds`,
+`litellm_max_retries`); um HTTP 4xx nunca é retentado (não é
+transitório). Lotes de até `litellm_embedding_batch_size` textos por
+requisição (default 100); a resposta é reordenada pelo campo `index`
+de cada item, nunca assumindo que o gateway devolve na ordem enviada.
+
+**O que fica de fora desta atividade, propositalmente**: nenhum proxy
+LiteLLM real é provisionado (`docker-compose.yml` não ganhou um serviço
+novo) — isso exigiria escolher e configurar credenciais de um provedor
+de embeddings de verdade, o que não existia em lugar nenhum do
+`.env.example` até agora. É uma decisão de produto (qual provedor, que
+chave usar) que ficou para o usuário decidir explicitamente, não algo
+para assumir sozinho. `Settings.litellm_base_url` já aponta para onde
+o gateway deveria estar (`http://localhost:4000`, a porta padrão do
+proxy LiteLLM) para quando isso for provisionado.
+
+**Alias versionado**: `config/models/embedding.v1.yaml` (carregado por
+`packages/config/models.py::get_default_embedding_model()`, mesma
+convenção de `packages/generation/prompts.py`/RAG-040) declara o alias
+que a aplicação usa — trocar o modelo por trás do alias é configuração
+do gateway LiteLLM, não deste repositório; uma mudança que precise de
+um alias novo cria `embedding.v2.yaml`, nunca edita o existente.
+
+Testes: `tests/unit/test_litellm_embedding_provider.py` cobre os
+critérios de aceite — lista vazia não chama o gateway, alias e textos
+corretos são enviados, resposta fora de ordem é corrigida, batching
+com preservação de ordem, retry com sucesso na tentativa seguinte,
+esgotamento de retries por timeout/erro de servidor/erro de conexão,
+erro de cliente (4xx) sem retry, corpo malformado, contagem
+divergente, e header de autorização quando `LITELLM_API_KEY` está
+configurado — tudo via `httpx.MockTransport`, sem chamar um serviço
+real. `tests/unit/test_model_config.py` cobre o carregador de alias
+(mesmos critérios de `test_prompts.py`).
