@@ -58,6 +58,63 @@ services:
       timeout: 5s
       retries: 10
 
+  ollama:
+    # Serve o modelo de embeddings self-hospedado (RAG-030): CPU-only,
+    # sem GPU, adequado para Qwen3-Embedding-0.6B (decisão de produto
+    # do RAG-030 — ver adapters/postgres/models/chunk.py). Preferido a
+    # Text Embeddings Inference (TEI) para este modelo especificamente:
+    # TEI teve problemas conhecidos rodando o Qwen3-Embedding-0.6B em
+    # CPU (crash por falta de export ONNX/erros de Intel MKL) — Ollama
+    # usa llama.cpp (GGUF), motor de inferência CPU maduro, sem essa
+    # limitação.
+    image: ollama/ollama:0.33.1
+    restart: unless-stopped
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  ollama-pull-embedding-model:
+    # Roda uma vez e sai: baixa o Qwen3-Embedding-0.6B (~640MB) no
+    # volume `ollama_data` na primeira subida. Em subidas seguintes o
+    # modelo já está local e este serviço termina quase instantaneamente
+    # (`ollama pull` é idempotente). O serviço `litellm` só sobe depois
+    # deste terminar com sucesso, pra nunca tentar servir com o modelo
+    # ainda ausente.
+    image: ollama/ollama:0.33.1
+    restart: "no"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: ["ollama"]
+    command: ["pull", "qwen3-embedding:0.6b"]
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+
+  litellm:
+    # Gateway de embeddings/geração (RAG-025, seção 5 do plano: "AI
+    # Gateway: LiteLLM") — a aplicação só fala HTTP com este serviço
+    # (adapters/litellm/), nunca diretamente com o Ollama. Config em
+    # config/litellm/config.yaml mapeia o alias estável
+    # `embedding-model-alias` para o modelo real (RAG-030).
+    image: docker.litellm.ai/berriai/litellm:latest
+    restart: unless-stopped
+    command: ["--config", "/etc/litellm/config.yaml", "--port", "4000"]
+    volumes:
+      - ./config/litellm/config.yaml:/etc/litellm/config.yaml:ro
+    environment:
+      OLLAMA_API_BASE: http://ollama:11434
+    ports:
+      - "${LITELLM_PORT:-4000}:4000"
+    depends_on:
+      ollama-pull-embedding-model:
+        condition: service_completed_successfully
+
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.105.0
     restart: unless-stopped
@@ -114,3 +171,4 @@ volumes:
   minio_data:
   prometheus_data:
   grafana_data:
+  ollama_data:
