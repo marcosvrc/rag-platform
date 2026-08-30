@@ -299,6 +299,51 @@ class TestEvaluateGeneration:
         assert first_answer.startswith("A arquitetura é hexagonal")
         assert first_context == (_CORPUS_CONTENT,)
 
+    async def test_max_cases_limits_how_many_answerable_cases_are_processed(
+        self,
+        knowledge_base_repository: InMemoryKnowledgeBaseRepository,
+        document_repository: InMemoryDocumentRepository,
+        query_repository: InMemoryQueryRepository,
+        vector_search: InMemoryVectorSearch,
+        lexical_search: InMemoryLexicalSearch,
+    ) -> None:
+        knowledge_base_id = await _seed_knowledge_base_and_corpus(
+            knowledge_base_repository=knowledge_base_repository,
+            document_repository=document_repository,
+            vector_search=vector_search,
+        )
+        # Só um score configurado: se max_cases não limitasse a "c2"
+        # (a segunda pergunta respondível), o avaliador fake estouraria
+        # ao tentar dar `pop(0)` numa lista vazia.
+        evaluator = _FakeGenerationEvaluator([(0.9, 0.8, 20, 5)])
+
+        report = await evaluate_generation(
+            dataset=_build_dataset(),
+            knowledge_base_repository=knowledge_base_repository,
+            document_repository=document_repository,
+            query_repository=query_repository,
+            embedding_provider=_FakeEmbeddingProvider(),
+            vector_search=vector_search,
+            lexical_search=lexical_search,
+            reranker=PassthroughReranker(),
+            reranker_enabled=False,
+            generation_provider=_EchoingGenerationProvider(),
+            generation_model_alias=_GENERATION_ALIAS,
+            generation_fallback_alias=None,
+            prompt_template=get_default_answer_prompt(),
+            generation_evaluator=evaluator,
+            evaluator_model_alias=_EVALUATOR_ALIAS,
+            tenant_id=TENANT_ID,
+            knowledge_base_id=knowledge_base_id,
+            top_k=5,
+            retrieval_minimum_score=0.0,
+            context_token_budget=3000,
+            max_cases=1,
+        )
+
+        assert report.evaluated_case_count == 1
+        assert [case.case_id for case in report.case_results] == ["c1"]
+
 
 def _report(*, faithfulness: float, answer_relevancy: float) -> GenerationEvaluationReport:
     return GenerationEvaluationReport(
