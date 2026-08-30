@@ -5,7 +5,7 @@ PYTHON ?= python3.12
 VENV := .venv
 BIN := $(VENV)/bin
 
-.PHONY: venv install lint format typecheck test security run-api run-worker check rag-quality-gate clean
+.PHONY: venv install lint format typecheck test e2e security run-api run-worker check rag-quality-gate clean
 
 venv:
 	$(PYTHON) -m venv $(VENV)
@@ -26,6 +26,16 @@ typecheck:
 
 test:
 	$(BIN)/pytest
+
+# RAG-080 — teste E2E principal: fluxo completo via HTTP contra a
+# app real (sem nenhum dependency_overrides), com Postgres/pgvector,
+# MinIO e o gateway LiteLLM de verdade de pé (`docker compose up -d`,
+# RAG-003, e um `.env` real — ver tests/e2e/conftest.py). Por isso NÃO
+# faz parte de `test`/`check`/do CI comum (RAG-070): usa `--no-cov`
+# porque o teto de cobertura de 85% (`[tool.coverage.report]` acima) é
+# medido sobre a suíte `tests/unit`, não sobre este cenário E2E único.
+e2e:
+	$(BIN)/pytest tests/e2e --no-cov
 
 # SAST (bandit) + SCA (pip-audit) + validação do arquivo de exceções
 # (RAG-071). Não inclui secret scanning (gitleaks) nem lint de
