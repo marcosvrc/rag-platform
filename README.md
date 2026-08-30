@@ -1315,3 +1315,78 @@ de fato funcionam (o smoke check acima) só acontece na primeira run
 real do workflow, após o merge — mesma limitação já documentada para
 os demais adapters/infra deste projeto que dependem de um ambiente
 real (Postgres, Collector) que este sandbox não tem.
+## Reranker (RAG-033)
+
+Reordena os candidatos que já saíram da fusão RRF (RAG-032) por
+relevância de verdade em relação à query, via um cross-encoder —
+mais caro e mais preciso que o ranking por similaridade/RRF que já
+os trouxe até ali. É o último passo de recuperação antes do endpoint
+`retrieve` (RAG-034, ainda não implementado) e do context builder
+(RAG-041).
+
+**Porta e adapters configuráveis** (critério de aceite "pode ser
+desativado"): `packages/application/ports/reranker.py` define
+`RerankerPort` — domínio e casos de uso não importam LiteLLM (nem
+qualquer cliente HTTP) diretamente, mesma disciplina hexagonal de
+todo o projeto (seção 5.1 do plano). "Desativado" é a configuração de
+QUAL adapter é injetado, nunca um `if` dentro de um adapter só:
+`LiteLLMReranker` (`adapters/reranker/litellm.py`, reranking real via
+o gateway LiteLLM) e `PassthroughReranker`
+(`adapters/reranker/passthrough.py`, devolve os candidatos na mesma
+ordem, truncados a `top_n`) implementam a mesma porta — quem chama
+nunca sabe qual dos dois está por trás. A escolha é
+`Settings.reranker_enabled` (`RERANKER_ENABLED`, padrão `false`) — cabe
+a quem monta o endpoint `retrieve` (RAG-034) escolher o adapter a
+partir dela; esta atividade só entrega a porta, os dois adapters e a
+configuração, não o ponto de injeção (que ainda não existe).
+
+**`LiteLLMReranker`** fala com o mesmo gateway LiteLLM de RAG-025/030
+(`POST {base_url}/rerank`), no formato Cohere Rerank v2 que o LiteLLM
+segue para qualquer provedor por trás (Cohere, Voyage, ou um reranker
+self-hospedado): `{"model": alias, "query": ..., "documents": [...],
+"top_n": ...}` → `{"results": [{"index": int, "relevance_score":
+float}, ...]}`. Reaproveita as MESMAS configurações de timeout/retry
+do gateway de embeddings (`Settings.litellm_*`) — é o mesmo proxy
+LiteLLM, só um alias/endpoint diferente; mesma classificação de erro
+de `adapters/litellm/embedding_provider.py` (HTTP 4xx nunca é
+retentado; HTTP >= 500/erro de conexão/resposta malformada esgotam as
+tentativas antes de levantar `RerankerUnavailableError`). O alias
+(`config/models/reranker.v1.yaml`, `reranker-model-alias`) segue a
+mesma convenção de `embedding.v1.yaml` (RAG-025/030): qual modelo real
+fica atrás dele é decisão de configuração do gateway LiteLLM
+(`config/litellm/config.yaml`), não deste arquivo. Este ticket não
+escolhe nem provisiona esse modelo real — a atividade não pede essa
+decisão (ao contrário de RAG-030, cujo critério de aceite exigia
+decidir o modelo de embeddings) — fica para quando o endpoint
+`retrieve` (RAG-034) de fato ligar `RERANKER_ENABLED=true`.
+
+**"timeout usa ranking anterior"** (critério de aceite):
+`rerank_safely()` (mesmo padrão de `record_audit_event_safely`,
+RAG-054) envolve `RerankerPort.rerank(...)` e devolve os candidatos
+ORIGINAIS (truncados a `top_n`, na ordem de entrada — o "ranking
+anterior" já produzido pela fusão RRF) em qualquer `RerankerError`
+(timeout ou qualquer outro erro do gateway), nunca propagando a
+exceção. Reranking é uma melhoria de qualidade sobre um ranking que já
+é bom o suficiente — nunca deve derrubar uma consulta inteira.
+
+**"registra latência sem registrar texto sensível"** (critério de
+aceite): `LiteLLMReranker` mede a duração da chamada e registra via
+`packages.observability.metrics.record_reranker_call` (RAG-053, só um
+histograma, sem labels) — nunca o texto dos chunks nem a query, que
+nunca viram atributo de métrica nem de log.
+
+Testes: `tests/unit/test_reranker.py` cobre `rerank_safely` (sucesso
+repassado verbatim; fallback para o ranking anterior em timeout e em
+erro de indisponibilidade; truncamento a `top_n` no fallback).
+`tests/unit/test_passthrough_reranker.py` cobre `PassthroughReranker`
+(ordem preservada, truncamento, lista vazia). `tests/unit/
+test_litellm_reranker.py` cobre `LiteLLMReranker` — mesma estrutura de
+`test_litellm_embedding_provider.py`, todo o transporte HTTP dublado
+via `httpx.MockTransport`: alias/query/documentos enviados
+corretamente, reordenação por `relevance_score` decrescente,
+truncamento a `top_n`, retry em erro transitório, esgotamento de
+tentativas (timeout e indisponibilidade), erro 4xx nunca retentado,
+resposta malformada, header `Authorization` quando `LITELLM_API_KEY`
+configurado, e a métrica de latência (chamada só quando há
+candidatos). `tests/unit/test_model_config.py` cobre o alias
+`reranker.v1.yaml`.

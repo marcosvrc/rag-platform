@@ -1,0 +1,8 @@
+# Alias de reranker resolvido pelo gateway LiteLLM (RAG-033), mesma
+# convenção de embedding.v1.yaml (RAG-025): trocar o modelo por trás
+# deste alias é uma mudança de CONFIGURAÇÃO no gateway LiteLLM, não
+# deste arquivo; uma mudança que precise de um alias novo cria
+# reranker.v2.yaml, nunca edita este.
+id: reranker
+version: v1
+alias: reranker-model-alias

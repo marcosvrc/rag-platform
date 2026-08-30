@@ -12,6 +12,7 @@ from packages.config.models import (
     ModelConfig,
     ModelConfigNotFoundError,
     get_default_embedding_model,
+    get_default_reranker_model,
     load_model_config,
 )
 
@@ -62,6 +63,22 @@ def test_get_default_embedding_model_retorna_embedding_v1() -> None:
     config = get_default_embedding_model()
 
     assert config.id == "embedding"
+    assert config.version == "v1"
+
+
+def test_load_model_config_reranker_v1_tem_id_e_versao_corretos() -> None:
+    config = load_model_config("reranker", "v1")
+
+    assert isinstance(config, ModelConfig)
+    assert config.id == "reranker"
+    assert config.version == "v1"
+    assert config.alias.strip() != ""
+
+
+def test_get_default_reranker_model_retorna_reranker_v1() -> None:
+    config = get_default_reranker_model()
+
+    assert config.id == "reranker"
     assert config.version == "v1"
 
 

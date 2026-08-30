@@ -74,3 +74,9 @@ def get_default_embedding_model() -> ModelConfig:
     quem gera embeddings deve chamar esta função, nunca
     `load_model_config("embedding", ...)` com uma versão hardcoded."""
     return load_model_config("embedding", "v1")
+
+
+def get_default_reranker_model() -> ModelConfig:
+    """O alias de reranker atualmente usado pela aplicação (RAG-033).
+    Mesma convenção de `get_default_embedding_model` acima."""
+    return load_model_config("reranker", "v1")
