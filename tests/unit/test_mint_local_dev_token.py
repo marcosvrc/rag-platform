@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -100,8 +101,17 @@ def test_main_prints_token_and_returns_zero(capsys: pytest.CaptureFixture[str]) 
 
 
 def test_main_returns_one_and_prints_error_on_configuration_error(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
+    """`monkeypatch.chdir(tmp_path)` isola este teste de um `.env` real
+    no diretório de trabalho do repositório (ex.: o que RAG-080 pede
+    para criar antes de `make e2e`, RAG-004/settings.py:
+    `env_file=".env"`, caminho relativo). Sem isso, `get_settings()`
+    recuperaria `JWT_SECRET` do arquivo mesmo com a variável de
+    ambiente removida por `monkeypatch.delenv` — o teste passaria a
+    falhar sempre que um `.env` de verdade existisse no repositório,
+    apesar de nenhuma mudança de comportamento real ter ocorrido."""
+    monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("JWT_SECRET", raising=False)
     from packages.config import settings as settings_module
 
