@@ -7,14 +7,18 @@ todas as `QueryEvidence` nascem juntas, num único `commit()`."""
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from adapters.postgres.models.feedback import FeedbackModel
 from adapters.postgres.models.query_evidence import QueryEvidenceModel
 from adapters.postgres.models.query_log import QueryLogModel
 from packages.application.ports.query_repository import QueryEvidenceInput, QueryRepositoryPort
+from packages.domain.entities.feedback import Feedback
 from packages.domain.entities.query_log import QueryLog, TokenUsage
+from packages.domain.enums.feedback_rating import FeedbackRating
 
 
 def _to_entity(model: QueryLogModel) -> QueryLog:
@@ -27,6 +31,17 @@ def _to_entity(model: QueryLogModel) -> QueryLog:
         latency_ms=model.latency_ms,
         token_usage=TokenUsage(input_tokens=model.input_tokens, output_tokens=model.output_tokens),
         trace_id=model.trace_id,
+    )
+
+
+def _feedback_to_entity(model: FeedbackModel) -> Feedback:
+    return Feedback(
+        id=model.id,
+        query_id=model.query_id,
+        rating=model.rating,
+        reason=model.reason,
+        expected_answer=model.expected_answer,
+        created_at=model.created_at,
     )
 
 
@@ -70,3 +85,27 @@ class PostgresQueryRepository(QueryRepositoryPort):
         )
         await self._session.commit()
         return _to_entity(query_log_model)
+
+    async def get_query_log(self, *, query_id: UUID) -> QueryLog | None:
+        model = await self._session.get(QueryLogModel, query_id)
+        return _to_entity(model) if model is not None else None
+
+    async def persist_feedback(
+        self,
+        *,
+        query_id: UUID,
+        rating: FeedbackRating,
+        reason: str | None,
+        expected_answer: str | None,
+    ) -> Feedback:
+        model = FeedbackModel(
+            id=uuid4(),
+            query_id=query_id,
+            rating=rating,
+            reason=reason,
+            expected_answer=expected_answer,
+            created_at=datetime.now(UTC),
+        )
+        self._session.add(model)
+        await self._session.commit()
+        return _feedback_to_entity(model)

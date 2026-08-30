@@ -10,6 +10,7 @@ import pytest
 from adapters.query_repository.in_memory import InMemoryQueryRepository
 from packages.application.ports.query_repository import QueryEvidenceInput
 from packages.domain.entities.query_log import TokenUsage
+from packages.domain.enums.feedback_rating import FeedbackRating
 
 TENANT_ID = uuid4()
 KNOWLEDGE_BASE_ID = uuid4()
@@ -118,3 +119,110 @@ async def test_persist_query_twice_creates_two_independent_query_logs(
 
     assert first.id != second.id
     assert len(repository.query_logs) == 2
+
+
+# --- RAG-045: get_query_log / persist_feedback ---
+
+
+async def test_get_query_log_returns_none_for_unknown_id(
+    repository: InMemoryQueryRepository,
+) -> None:
+    assert await repository.get_query_log(query_id=uuid4()) is None
+
+
+async def test_get_query_log_returns_the_persisted_query_log(
+    repository: InMemoryQueryRepository,
+) -> None:
+    query_log = await repository.persist_query(
+        tenant_id=TENANT_ID,
+        knowledge_base_id=KNOWLEDGE_BASE_ID,
+        question_hash="a" * 64,
+        model="m",
+        latency_ms=1,
+        token_usage=TokenUsage(input_tokens=0, output_tokens=0),
+        trace_id=uuid4(),
+        evidence=[],
+    )
+
+    found = await repository.get_query_log(query_id=query_log.id)
+
+    assert found == query_log
+
+
+async def test_persist_feedback_creates_a_feedback_with_a_new_id(
+    repository: InMemoryQueryRepository,
+) -> None:
+    query_log = await repository.persist_query(
+        tenant_id=TENANT_ID,
+        knowledge_base_id=KNOWLEDGE_BASE_ID,
+        question_hash="a" * 64,
+        model="m",
+        latency_ms=1,
+        token_usage=TokenUsage(input_tokens=0, output_tokens=0),
+        trace_id=uuid4(),
+        evidence=[],
+    )
+
+    feedback = await repository.persist_feedback(
+        query_id=query_log.id,
+        rating=FeedbackRating.POSITIVE,
+        reason=None,
+        expected_answer=None,
+    )
+
+    assert feedback.query_id == query_log.id
+    assert feedback.rating == FeedbackRating.POSITIVE
+    assert feedback.reason is None
+    assert feedback.expected_answer is None
+    assert feedback in repository.feedbacks
+
+
+async def test_persist_feedback_stores_reason_and_expected_answer(
+    repository: InMemoryQueryRepository,
+) -> None:
+    query_log = await repository.persist_query(
+        tenant_id=TENANT_ID,
+        knowledge_base_id=KNOWLEDGE_BASE_ID,
+        question_hash="a" * 64,
+        model="m",
+        latency_ms=1,
+        token_usage=TokenUsage(input_tokens=0, output_tokens=0),
+        trace_id=uuid4(),
+        evidence=[],
+    )
+
+    feedback = await repository.persist_feedback(
+        query_id=query_log.id,
+        rating=FeedbackRating.NEGATIVE,
+        reason="resposta incompleta",
+        expected_answer="deveria citar a seção 3",
+    )
+
+    assert feedback.rating == FeedbackRating.NEGATIVE
+    assert feedback.reason == "resposta incompleta"
+    assert feedback.expected_answer == "deveria citar a seção 3"
+
+
+async def test_persist_feedback_twice_creates_two_independent_feedbacks(
+    repository: InMemoryQueryRepository,
+) -> None:
+    query_log = await repository.persist_query(
+        tenant_id=TENANT_ID,
+        knowledge_base_id=KNOWLEDGE_BASE_ID,
+        question_hash="a" * 64,
+        model="m",
+        latency_ms=1,
+        token_usage=TokenUsage(input_tokens=0, output_tokens=0),
+        trace_id=uuid4(),
+        evidence=[],
+    )
+
+    first = await repository.persist_feedback(
+        query_id=query_log.id, rating=FeedbackRating.POSITIVE, reason=None, expected_answer=None
+    )
+    second = await repository.persist_feedback(
+        query_id=query_log.id, rating=FeedbackRating.NEGATIVE, reason="x", expected_answer=None
+    )
+
+    assert first.id != second.id
+    assert len(repository.feedbacks) == 2

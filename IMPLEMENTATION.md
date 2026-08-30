@@ -1792,3 +1792,60 @@ novo `test_query_repository_in_memory.py`, e extensões em
 `adapters/document_repository/postgres.py`) seguem o mesmo padrão já
 estabelecido no projeto: sem teste direto (só integração, RAG-080,
 fecharia essa lacuna) — mypy garante a corretude de tipos.
+
+## Feedback (RAG-045)
+
+Endpoint `POST /v1/feedback` (seção 10.3 do plano): registra a
+avaliação do usuário (`Feedback`, seção 9 do plano; já modelado desde
+RAG-010, tabela `feedbacks` já migrada em RAG-011/migração 0002 — esta
+atividade não precisa de migração nova) sobre uma resposta já dada por
+`POST .../query` (RAG-044).
+
+**Standalone, não aninhado sob uma base de conhecimento**:
+`/v1/feedback` recebe `query_id` no corpo — a base de conhecimento já
+está implícita no `QueryLog` correspondente, então não há necessidade
+de `knowledge_base_id` na URL nem no payload.
+
+**`get_query_log`/`persist_feedback` vivem em `QueryRepositoryPort`**,
+não em uma porta nova: `Feedback` é sempre subordinado a um `QueryLog`
+já existente (FK `query_id`, `ondelete=CASCADE`), mesmo racional de
+`DocumentRepositoryPort` reunir `Document`+`DocumentVersion`+`IndexJob`
+numa porta só. `get_query_log` não filtra por tenant no nível da porta
+(mesmo padrão de `DocumentRepositoryPort.get_document`) — quem decide
+se o `tenant_id` do `QueryLog` encontrado corresponde ao do tenant
+autenticado é o caso de uso.
+
+**"respeita tenant; não permite feedback para query alheia"** (critério
+de aceite): `submit_feedback` (`packages/application/commands/
+feedback.py`) resolve `query_id` via `get_query_log` e levanta
+`NotFoundError` (404) tanto para uma consulta inexistente quanto para
+uma consulta de outro tenant — exatamente o mesmo erro nos dois casos,
+mesma disciplina "404, nunca 403" de todo o resto da API
+(RAG-012/RAG-021/RAG-034/RAG-044).
+
+**"valida rating e motivo"** (critério de aceite), interpretado nesta
+atividade como: `rating` só aceita os dois valores de `FeedbackRating`
+— qualquer outra string já é 422 automaticamente pela validação de
+enum do Pydantic, sem lógica extra necessária; `reason` é obrigatório
+quando `rating == NEGATIVE` (`model_validator` em
+`packages/contracts/feedback.py::FeedbackRequest`) — decisão desta
+atividade, já que o plano não elabora o que "validar motivo" significa
+concretamente, e um feedback negativo sem motivo não é acionável para
+quem for revisar a resposta depois. Para `POSITIVE`, `reason` continua
+opcional. Essa validação é de forma/contrato (422 na borda HTTP), não
+uma regra de negócio do caso de uso — mesma disciplina já usada no
+resto da API (validação de payload no contrato, regra de negócio no
+caso de uso).
+
+Testes: `test_feedback_command.py` (caso de uso, com fake em memória —
+100% de cobertura), `test_feedback_router.py` (visão HTTP, mesmo padrão
+de `test_query_router.py` — semeia um `QueryLog` diretamente via
+`InMemoryQueryRepository.persist_query`, sem precisar rodar o pipeline
+completo de consulta nem criar uma base de conhecimento), extensões em
+`test_query_repository_in_memory.py` para `get_query_log`/
+`persist_feedback`. O método novo de `adapters/query_repository/
+postgres.py` segue o mesmo padrão já estabelecido no projeto: sem teste
+direto (só integração, RAG-080, fecharia essa lacuna) — mypy garante a
+corretude de tipos.
+
+Com RAG-045, a épica E4 (Geração fundamentada) está completa.
