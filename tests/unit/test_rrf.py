@@ -99,15 +99,23 @@ def test_a_smaller_k_makes_position_differences_matter_more() -> None:
 
 
 def test_ties_are_broken_deterministically_by_chunk_id() -> None:
+    """Um empate de verdade precisa vir da mesma posição (rank) em
+    rankings DIFERENTES — `first` em 1º no vetorial e `second` em 1º no
+    lexical, cada um sozinho na sua lista, dão a mesma contribuição
+    `1/(k+1)`. Colocar os dois no mesmo ranking (ranks 1 e 2) não seria
+    um empate de verdade — o de rank 1 sempre pontuaria mais alto,
+    tornando o teste dependente da ordem de geração dos UUIDs (falho
+    ~50% das vezes) em vez de testar o desempate."""
     first = _chunk()
     second = _chunk()
     expected_order = sorted([first.id, second.id], key=str)
 
     fused = reciprocal_rank_fusion(
-        vector_results=[_scored(first, 1.0), _scored(second, 1.0)],
-        lexical_results=[],
+        vector_results=[_scored(first, 1.0)],
+        lexical_results=[_scored(second, 1.0)],
     )
 
+    assert fused[0].score == pytest.approx(fused[1].score)
     assert [scored.chunk.id for scored in fused] == expected_order
 
 
