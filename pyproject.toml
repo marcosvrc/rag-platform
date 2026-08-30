@@ -130,7 +130,7 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "8.0"
-testpaths = ["tests"]
+testpaths = ["tests/unit"]  # RAG-080: tests/e2e roda só via "make e2e" (pytest tests/e2e --no-cov), nunca no pytest/make test padrão.
 pythonpath = ["."]
 asyncio_mode = "auto"
 addopts = """

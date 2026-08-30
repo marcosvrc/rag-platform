@@ -2310,3 +2310,96 @@ revisores obrigatórios do ambiente `production` antes do primeiro uso.
 Sem mudança de código Python nesta atividade (nenhum arquivo `.py`
 tocado) — ruff/mypy/pytest/bandit/pip-audit seguem no baseline de
 `master`, sem regressão. Sem migração.
+## Teste E2E principal (RAG-080)
+
+`tests/e2e/test_rag_pipeline.py` cobre, de ponta a ponta e contra a
+stack real (Postgres/pgvector, MinIO, gateway LiteLLM — `docker compose
+up -d`, RAG-003), o fluxo completo do plano (seção 22, "teste E2E
+principal"): cria uma base de conhecimento, envia um documento, indexa,
+consulta com geração e valida que a resposta cita o documento certo —
+mais um segundo cenário dedicado a isolamento entre tenants.
+
+**Sem nenhum `app.dependency_overrides`** — ao contrário de toda a
+suíte em `tests/unit` (que troca Postgres/MinIO/LiteLLM reais por fakes
+em memória): `tests/e2e` sobe `apps.api.main.app` exatamente como ela
+roda em produção, contra as portas concretas de verdade. É essa
+diferença que faz este teste ser "principal"/E2E, e não mais um teste
+de integração — mas também é o motivo de exigir infraestrutura real de
+pé para rodar (ver "Como rodar" abaixo).
+
+**Autenticação**: reaproveita `scripts/mint_local_dev_token.py::mint_token`
+(RAG-050) para mintar um JWT real, assinado com o `JWT_SECRET` de
+verdade lido de `get_settings()` — nunca um segredo de teste próprio,
+já que não há `dependency_overrides` do verificador de token para
+substituir.
+
+**Indexação sem worker Celery real**: `tests/e2e/test_rag_pipeline.py`
+chama `apps.indexing_worker.tasks._run_attempt(index_job_id,
+attempt_number=1, max_attempts=5)` diretamente, em vez de publicar o
+job e esperar um worker consumir a fila. `_run_attempt` é a mesma
+função de negócio que a task Celery (`process_index_job_task`) chama
+por baixo — só invocada aqui de forma síncrona e in-process, sem exigir
+um worker separado rodando durante o teste. Isso simplifica o teste sem
+abrir mão de exercitar o pipeline de indexação real (Docling, chunking,
+embeddings via LiteLLM, persistência — RAG-023 a RAG-026).
+
+**Fixture conhecida**: `tests/e2e/fixtures/nimbus-rewards.md` descreve
+um programa de fidelidade inteiramente fictício ("Nimbus Rewards"), com
+um código secreto ("GIRASSOL-7") que não existe em nenhum outro lugar
+— nem no treinamento do modelo de geração, nem em qualquer outro
+documento deste projeto. A pergunta do teste ("qual o código secreto
+de ativação...") só tem resposta correta se o modelo realmente recebeu
+o chunk certo como contexto — validação mais forte de "grounded" do que
+comparar a resposta gerada contra um texto exato (a saída de um LLM
+real não é determinística entre execuções): o teste verifica
+`grounded=True` e que a citação aponta para o documento certo
+(`document_name`), nunca o texto literal da resposta.
+
+**Isolamento entre tenants**: um segundo cenário
+(`test_isolamento_entre_tenants`) cria uma base de conhecimento como
+tenant A e confirma que tenant B recebe 404 (nunca 403 — seção 13 do
+plano) ao tentar ler a base, fazer upload de documento nela ou
+consultá-la — mesmo padrão "404, nunca 403" já usado em toda a API
+(RAG-012, RAG-021, RAG-044).
+
+**Por que `tests/e2e` nunca roda em `make test`/CI comum**: exige
+Postgres/MinIO/LiteLLM reais de pé, ao contrário de toda a suíte em
+`tests/unit`, que roda em qualquer lugar com só as dependências Python
+instaladas. Rodá-lo em `pull-request.yml` (RAG-070) falharia sempre —
+não por regressão, mas por falta de infraestrutura — bloqueando toda PR
+por um motivo desconectado da qualidade do código, o mesmo racional já
+aplicado ao quality gate de RAG (RAG-073) e ao deploy DEV (RAG-074).
+Duas mudanças garantem esse isolamento:
+
+- `pyproject.toml`: `[tool.pytest.ini_options].testpaths` mudou de
+  `["tests"]` para `["tests/unit"]` — um `pytest`/`make test` sem
+  argumentos agora só coleta `tests/unit` (os 740 testes existentes,
+  inalterados), nunca `tests/e2e` (nem os outros diretórios ainda
+  vazios, `tests/integration`/`tests/contract`/`tests/evaluation`).
+  Antes desta mudança, criar `tests/e2e/*.py` faria um `pytest` comum
+  tentar coletar e rodar esses arquivos também — e falhar, sem
+  Postgres/MinIO/LiteLLM disponíveis — quebrando o CI verde existente.
+- `Makefile`: novo alvo `make e2e` (`pytest tests/e2e --no-cov`),
+  documentado como exigindo `docker compose up -d` (RAG-003) e um
+  `.env` real — mesmo espírito de `make rag-quality-gate` (RAG-073),
+  um alvo "requer infraestrutura real" mantido fora de `make
+  check`/CI comum. `--no-cov` evita que o teto de cobertura de 85%
+  (`[tool.coverage.report].fail_under`, medido sobre `tests/unit`) seja
+  avaliado — sem sentido — contra uma execução de só dois testes E2E.
+
+**Como rodar**: `docker compose up -d` (RAG-003) para subir a
+infraestrutura local, garantir um `.env` real configurado
+(`JWT_SECRET`/`JWT_ISSUER`/`JWT_AUDIENCE`, credenciais de Postgres/MinIO,
+`LITELLM_BASE_URL` apontando para o LiteLLM local), aplicar as
+migrations (`alembic upgrade head`) e então `make e2e`.
+
+**Estado de verificação — aviso importante**: este teste foi escrito e
+validado com `ruff format`/`ruff check`/`mypy` (100% limpo, incluindo
+`tests/e2e/`) e com a suíte `tests/unit` completa (740 testes, cobertura
+93,43%, confirmando que a mudança de `testpaths` não altera o
+comportamento do CI existente) — mas **nunca foi executado de fato**:
+o ambiente onde esta atividade foi implementada não tem Docker
+disponível para subir Postgres/pgvector/MinIO/LiteLLM. Recomenda-se
+fortemente rodar `make e2e` localmente (com a stack de pé) antes de
+considerar este critério de aceite satisfeito — a mesma ressalva já
+feita para os workflows de deploy DEV (RAG-074) e release (RAG-075).
