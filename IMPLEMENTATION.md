@@ -2084,6 +2084,80 @@ violação — 100% de cobertura); `test_check_evaluation_baseline.py`
 (extração de métricas de um ou mais relatórios, filtragem de
 booleanos, código de saída 0/1 — 100% de cobertura).
 
+## Deploy automatizado em DEV (RAG-074)
+
+Objetivo (seção 21/16.3 do plano): "implantar digest publicado e
+executar smoke test"; critério de aceite: "ambiente GitHub
+`development`; deploy rastreável; falha não promove release".
+
+**O que "ambiente DEV" significa nesta atividade** — decisão de escopo
+mais importante desta atividade, documentada tanto no workflow quanto
+no compose file: este repositório (uma POC) não tem nenhum servidor
+DEV persistente provisionado em lugar nenhum — nenhuma credencial de
+cloud, Terraform ou host remoto existe em qualquer lugar do projeto.
+"Implantar em DEV" foi interpretado como: subir a imagem PUBLICADA
+(nunca reconstruída, seção 16.5: "não reconstruir imagem durante
+promoção") numa stack efêmera na própria runner do GitHub Actions,
+aplicar as migrations e rodar um smoke test contra ela — a mesma
+imagem que rodaria num host real, só que o host é descartável. Isso
+satisfaz o critério de aceite literalmente sem fabricar uma
+infraestrutura persistente que não existe. Quando um host DEV real for
+provisionado, só o passo "subir a stack" muda (SSH/kubectl para o host
+real em vez de `docker compose` na runner) — a composição de serviços
+e o smoke test continuam os mesmos.
+
+**`deploy/compose/docker-compose.dev.yml`** (novo — o diretório
+`deploy/compose/` já existia, só com um `.gitkeep`, seção 7 do plano)
+— mesmos serviços de infraestrutura de `docker-compose.yml` (RAG-003:
+Postgres/pgvector, Redis, MinIO, Ollama + pull do modelo de embeddings,
+LiteLLM), sem a stack de observabilidade (não necessária para um smoke
+test) mais `api`/`worker`, cuja `image:` é obrigatória via
+`${API_IMAGE:?...}`/`${WORKER_IMAGE:?...}` (sem default: este arquivo
+só faz sentido apontando para uma tag já publicada, nunca para uma
+imagem local). Credenciais são valores efêmeros só desta stack
+descartável (nunca reaproveitados). `OTEL_TRACES_ENABLED`/
+`OTEL_METRICS_ENABLED=false` mantêm a instrumentação ativa contra o
+tracer/meter no-op, sem exigir o collector de pé.
+
+**`.github/workflows/deploy-dev.yml`** (novo) — dispara via
+`workflow_run` quando o workflow "Publish" (RAG-072) termina com
+sucesso em `master`, e também via `workflow_dispatch` (execução
+manual). Resolve o SHA publicado, faz checkout exatamente nele (não
+necessariamente a HEAD atual), sobe a infraestrutura
+(`docker compose ... up -d --wait`), aplica `alembic upgrade head` A
+PARTIR DO CÓDIGO-FONTE checked out (não de dentro do container: a
+imagem publicada não inclui `migrations/`/`alembic.ini`, só o código
+de aplicação, RAG-072) contra o Postgres já saudável, sobe `api`/
+`worker` com as imagens publicadas (`sha-<sha>`, nunca `:latest`),
+roda um smoke test (`GET /health/live` e `/health/ready` esperando
+200), publica um resumo no workflow e sempre derruba a stack ao final
+(`always()`).
+
+**"ambiente GitHub development"**: satisfeito pelo `environment:
+development` do job — cria automaticamente um registro de Deployment
+do GitHub (aba "Environments"/"Deployments" do repositório, rastreável
+ao SHA exato e ao resultado da run), sem nenhuma chamada manual à API
+de Deployments.
+
+**"falha não promove release"**: nenhum passo real usa
+`continue-on-error` — qualquer falha (infra não sobe, migration falha,
+smoke test recebe status != 200) falha o job inteiro, e portanto o
+Deployment do ambiente `development`. RAG-075 (ainda não implementada)
+deve promover só um digest cujo deploy em DEV tenha `conclusion:
+success` — verificável pela API de Deployments do ambiente ou pelo
+resultado desta run.
+
+**Aviso de verificação — importante para revisão**: este workflow foi
+validado com `actionlint` (sintaxe/expressões, sem achados, incluindo
+os workflows já existentes) e revisado manualmente linha a linha
+contra `docker-compose.yml`/os Dockerfiles, mas NUNCA rodou de
+verdade — o ambiente onde esta atividade foi implementada não tem
+Docker disponível para testar a stack de ponta a ponta. Ao contrário
+de RAG-061/062/063/073 (validados com pytest real), a corretude
+funcional deste workflow especificamente NÃO foi comprovada por execução.
+Recomenda-se fortemente disparar manualmente uma vez
+(`workflow_dispatch`) e observar o resultado antes de depender dele no
+fluxo de release.
 ## Quality gate de RAG no CI (RAG-073)
 
 Objetivo (seção 21 do plano): "executar avaliação reduzida em

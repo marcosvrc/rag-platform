@@ -1,0 +1,191 @@
+# rag-platform — stack de smoke-deploy do ambiente DEV (RAG-074).
+#
+# Usado só por `.github/workflows/deploy-dev.yml`, nunca para
+# desenvolvimento local (isso é `docker-compose.yml`, na raiz do
+# repositório) — por isso `API_IMAGE`/`WORKER_IMAGE` são obrigatórios
+# (`${VAR:?mensagem}`, sem default): este arquivo só faz sentido
+# apontando para uma tag/digest específico já publicado no GHCR pelo
+# workflow `publish.yml` (RAG-072), nunca para uma imagem construída
+# localmente.
+#
+# ## O que "ambiente DEV" significa nesta atividade
+#
+# Este repositório (uma POC) não tem nenhum servidor DEV persistente
+# provisionado em lugar nenhum — nenhuma credencial de cloud, Terraform
+# ou host remoto existe em nenhum lugar do projeto. "Implantar em DEV"
+# aqui significa: subir a imagem PUBLICADA (não reconstruída) numa
+# stack efêmera, na própria runner do GitHub Actions, e validá-la com
+# um smoke test — a mesma imagem que rodaria num host real, só que o
+# host, nesta atividade, é descartável. Isso ainda satisfaz o critério
+# de aceite ("implantar digest publicado e executar smoke test") sem
+# inventar uma infraestrutura que não existe. Quando um host DEV real
+# for provisionado, este arquivo continua útil (mesma composição de
+# serviços) — só o COMO ele é executado muda (SSH para o host real em
+# vez de `docker compose` na runner).
+#
+# Mesmos serviços de infraestrutura de `docker-compose.yml` (RAG-003),
+# sem a stack de observabilidade (otel-collector/prometheus/grafana):
+# um smoke test não precisa dela, e mantê-la fora encurta o tempo e a
+# superfície de falha desta atividade. `OTEL_TRACES_ENABLED`/
+# `OTEL_METRICS_ENABLED=false` abaixo mantêm a instrumentação ativa
+# contra o tracer/meter no-op padrão (packages/observability), sem
+# exigir um collector de pé.
+name: rag-platform-dev
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: rag_platform
+      POSTGRES_PASSWORD: rag_platform_dev_smoke_only
+      POSTGRES_DB: rag_platform
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag_platform -d rag_platform"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7.2-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    image: minio/minio:RELEASE.2024-08-03T04-33-23Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: rag_platform
+      MINIO_ROOT_PASSWORD: rag_platform_dev_smoke_only
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  ollama:
+    image: ollama/ollama:0.33.1
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  ollama-pull-embedding-model:
+    # Mesmo padrão de docker-compose.yml (RAG-030): baixa o modelo de
+    # embeddings uma vez; `litellm` só sobe depois deste terminar.
+    image: ollama/ollama:0.33.1
+    restart: "no"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: ["ollama"]
+    command: ["pull", "qwen3-embedding:0.6b"]
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+
+  litellm:
+    image: docker.litellm.ai/berriai/litellm:latest
+    command: ["--config", "/etc/litellm/config.yaml", "--port", "4000"]
+    volumes:
+      - ../../config/litellm/config.yaml:/etc/litellm/config.yaml:ro
+    environment:
+      OLLAMA_API_BASE: http://ollama:11434
+    ports:
+      - "4000:4000"
+    depends_on:
+      ollama-pull-embedding-model:
+        condition: service_completed_successfully
+
+  api:
+    image: "${API_IMAGE:?defina API_IMAGE com a tag/digest publicado, ex. ghcr.io/OWNER/rag-platform-api-sha-SHA}"
+    environment:
+      ENVIRONMENT: development
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: rag_platform
+      POSTGRES_PASSWORD: rag_platform_dev_smoke_only
+      POSTGRES_DB: rag_platform
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      MINIO_HOST: minio
+      MINIO_API_PORT: "9000"
+      MINIO_ROOT_USER: rag_platform
+      MINIO_ROOT_PASSWORD: rag_platform_dev_smoke_only
+      MINIO_USE_SSL: "false"
+      MINIO_BUCKET: rag-platform
+      JWT_ALGORITHM: HS256
+      # Segredo efêmero desta stack descartável — nunca reutilizado
+      # (nem persistido) fora da execução deste workflow.
+      JWT_SECRET: dev-smoke-deploy-ephemeral-secret
+      JWT_ISSUER: rag-platform-dev-smoke
+      JWT_AUDIENCE: rag-platform-dev-smoke-api
+      LITELLM_BASE_URL: http://litellm:4000
+      LITELLM_API_KEY: ""
+      OTEL_TRACES_ENABLED: "false"
+      OTEL_METRICS_ENABLED: "false"
+      RERANKER_ENABLED: "false"
+      GENERATION_FALLBACK_ENABLED: "false"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      minio:
+        condition: service_healthy
+      litellm:
+        condition: service_started
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  worker:
+    image: "${WORKER_IMAGE:?defina WORKER_IMAGE com a tag/digest publicado, ex. ghcr.io/OWNER/rag-platform-worker-sha-SHA}"
+    environment:
+      ENVIRONMENT: development
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: rag_platform
+      POSTGRES_PASSWORD: rag_platform_dev_smoke_only
+      POSTGRES_DB: rag_platform
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      MINIO_HOST: minio
+      MINIO_API_PORT: "9000"
+      MINIO_ROOT_USER: rag_platform
+      MINIO_ROOT_PASSWORD: rag_platform_dev_smoke_only
+      MINIO_USE_SSL: "false"
+      MINIO_BUCKET: rag-platform
+      JWT_ALGORITHM: HS256
+      JWT_SECRET: dev-smoke-deploy-ephemeral-secret
+      JWT_ISSUER: rag-platform-dev-smoke
+      JWT_AUDIENCE: rag-platform-dev-smoke-api
+      LITELLM_BASE_URL: http://litellm:4000
+      LITELLM_API_KEY: ""
+      OTEL_TRACES_ENABLED: "false"
+      OTEL_METRICS_ENABLED: "false"
+      RERANKER_ENABLED: "false"
+      GENERATION_FALLBACK_ENABLED: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      minio:
+        condition: service_healthy
+      litellm:
+        condition: service_started
