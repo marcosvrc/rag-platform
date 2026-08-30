@@ -2233,6 +2233,83 @@ não tem um teste unitário Python, mesmo padrão de qualquer outro
 arquivo `.github/workflows/*.yml` do projeto (nenhum deles é testado
 por `pytest`).
 
+## Release e produção (RAG-075)
+
+Objetivo (seção 16.4/21 do plano): "promover o mesmo digest com
+aprovação manual"; critério de aceite: "usa environment protegido;
+avaliação completa; rollback documentado e testado".
+
+**`.github/workflows/release.yml`** (novo) — dois jobs, na ordem da
+seção 16.4 do plano:
+
+1. `validate`: resolve o commit/versão do release (push de tag
+   `v*.*.*`, ou `workflow_dispatch` com `sha`/`version` explícitos —
+   este segundo caminho é também o mecanismo de rollback, ver abaixo);
+   confirma via a API de Deployments do GitHub que esse commit tem
+   pelo menos um deploy com `state: success` no ambiente `development`
+   (criado por `deploy-dev.yml`, RAG-074) — "selecionar o digest já
+   validado em DEV" — recusando promover qualquer commit que nunca
+   passou por DEV; roda a avaliação COMPLETA (RAG-061/062/063, sem
+   `--max-cases`, ao contrário do quality gate reduzido de RAG-073) —
+   "executar avaliação completa".
+2. `promote`: atrás de `environment: production` — "usa environment
+   protegido"/"solicitar aprovação pelo GitHub Environment" (seção
+   16.4, passo 4); re-tagueia as imagens já publicadas
+   (`sha-<sha>` → a tag semântica do release) via `docker buildx
+   imagetools create` — cópia de manifesto no registry, nunca um
+   rebuild ("não reconstruir imagem durante promoção"/"não usar
+   `latest` em deployments", seção 16.5); aplica as migrations
+   (`alembic upgrade head`, a partir do código-fonte no commit exato,
+   mesmo racional de RAG-074) e sobe a MESMA stack efêmera de
+   smoke-deploy de RAG-074 (`deploy/compose/docker-compose.dev.yml`,
+   reutilizada sem nenhuma mudança — só as tags de imagem diferem)
+   como validação final.
+
+**"aprovação manual"/"environment protegido"**: `environment:
+production` por si só não bloqueia nada até alguém configurar
+"Required reviewers" para o ambiente `production` em Settings →
+Environments no GitHub — isso é decisão/configuração de repositório,
+fora do escopo de um arquivo de workflow, e está documentado no
+cabeçalho do arquivo para quem for configurar.
+
+**Limitações documentadas desta atividade** (mesma honestidade de
+RAG-074 — este repositório, uma POC, não tem nenhum ambiente de
+produção persistente provisionado):
+
+- "Fazer deploy progressivo" (seção 16.4, passo 7) NÃO é implementado
+  de verdade: exigiria múltiplas réplicas e um balanceador deslocando
+  tráfego aos poucos, infraestrutura que este POC não tem. O
+  smoke-deploy completo do job `promote` é a aproximação disponível,
+  não um rollout progressivo real.
+- "Verificar métricas e executar rollback se necessário" (passo 8):
+  não há um dashboard de produção de verdade para checar
+  automaticamente — fica para quando um ambiente real existir.
+
+**Rollback — documentado e testado (critério de aceite)**: o
+mecanismo é disparar `release.yml` via `workflow_dispatch` apontando
+`sha`/`version` para um release anterior já validado em DEV (por
+exemplo, `sha` do commit da versão anterior e `version:
+v1.2.2-rollback-1`) — isso repromove exatamente aquele digest antigo
+pelo MESMO caminho de código do promote normal (checagem de deploy em
+DEV bem-sucedido, avaliação completa, aprovação manual, re-tag sem
+rebuild, migration, smoke test), nunca um branch de rollback separado
+e não testado à parte. "Testado" aqui significa: é o mesmo código já
+exercitado por um release normal, não uma segunda implementação
+paralela que só seria descoberta quebrada no primeiro rollback real.
+
+**Aviso de verificação — importante para revisão**: como RAG-074, este
+workflow foi validado com `actionlint` (sem achados, incluindo os
+workflows já existentes) e revisão manual linha a linha, mas NUNCA
+rodou de verdade (sem Docker disponível no ambiente onde foi
+implementado, e sem um ambiente `production` configurado neste
+repositório para observar um approval gate real). Recomenda-se
+fortemente testar via `workflow_dispatch` contra um commit já validado
+em DEV antes de depender dele para uma promoção real, e configurar os
+revisores obrigatórios do ambiente `production` antes do primeiro uso.
+
+Sem mudança de código Python nesta atividade (nenhum arquivo `.py`
+tocado) — ruff/mypy/pytest/bandit/pip-audit seguem no baseline de
+`master`, sem regressão. Sem migração.
 ## Teste E2E principal (RAG-080)
 
 `tests/e2e/test_rag_pipeline.py` cobre, de ponta a ponta e contra a

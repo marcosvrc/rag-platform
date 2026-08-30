@@ -1,0 +1,360 @@
+# RAG-075 — Release e produção.
+#
+# Promove, sob aprovação manual, um digest JÁ publicado (RAG-072) e JÁ
+# validado em DEV (RAG-074) — nunca reconstrói imagem (seção 16.5 do
+# plano: "não reconstruir imagem durante promoção"; "não usar `latest`
+# em deployments").
+#
+# Dois jobs, na ordem do plano (seção 16.4):
+#   1. `validate` — resolve qual commit/tag está sendo liberado (passo
+#      1, "receber tag semântica"), confirma que ESSE commit tem um
+#      deploy bem-sucedido no ambiente `development` (passo 2,
+#      "selecionar o digest já validado em DEV" — via a API de
+#      Deployments do GitHub, RAG-074) e roda a avaliação COMPLETA
+#      (passo 3, sem `--max-cases`, ao contrário do quality gate
+#      reduzido de RAG-073).
+#   2. `promote` — atrás de `environment: production` (passo 4,
+#      "solicitar aprovação pelo GitHub Environment" — critério de
+#      aceite "usa environment protegido"): re-tagueia as imagens já
+#      publicadas com a tag semântica (passo 5, "promover o mesmo
+#      digest", via `docker buildx imagetools create` — cópia de
+#      manifesto no registry, nunca um rebuild), aplica as migrations
+#      (passo 6) e sobe a MESMA stack efêmera de smoke-deploy de
+#      RAG-074 (`deploy/compose/docker-compose.dev.yml`, reutilizada
+#      tal como está — só os `API_IMAGE`/`WORKER_IMAGE` mudam) como
+#      verificação final antes de considerar o release liberado.
+#
+# ## Limitações documentadas desta atividade (leia antes de confiar em
+#    produção de verdade)
+#
+# Este repositório (POC) não tem nenhum ambiente de produção
+# persistente provisionado — nenhuma credencial de cloud, Terraform ou
+# host remoto existe em nenhum lugar do projeto (mesma limitação já
+# documentada em RAG-074 para DEV). Por isso:
+#
+#   - "Fazer deploy progressivo" (passo 7 da seção 16.4) NÃO é
+#     implementado de verdade aqui: deploy progressivo/canário exige
+#     múltiplas réplicas e um balanceador deslocando tráfego aos
+#     poucos — infraestrutura que este POC não tem. O job `promote`
+#     faz um smoke-deploy completo (equivalente ao de RAG-074) como a
+#     aproximação disponível, não um rollout progressivo real.
+#   - "Verificar métricas e executar rollback se necessário" (passo 8):
+#     não há um dashboard de produção de verdade para checar
+#     automaticamente aqui — isso fica para quando um ambiente real
+#     existir. O MECANISMO de rollback, porém, é implementado e
+#     testável hoje: rodar este mesmo workflow via `workflow_dispatch`
+#     apontando `sha`/`version` para um release anterior já validado
+#     em DEV repromove exatamente esse digest antigo, pelo mesmo
+#     caminho de código do promote normal (nunca um branch de rollback
+#     separado e não testado). Ver a seção "Rollback" no
+#     IMPLEMENTATION.md.
+#
+# ## Aprovação manual — configuração necessária no GitHub (fora deste arquivo)
+#
+# `environment: production` por si só NÃO bloqueia nada até alguém
+# configurar "Required reviewers" para o ambiente `production` em
+# Settings → Environments no GitHub — sem isso, o job `promote` roda
+# sem pausar para aprovação. Quem configura os revisores (e quantos)
+# é uma decisão de repositório, não deste workflow.
+#
+# ## Aviso de verificação
+#
+# Como RAG-074, este workflow foi validado com `actionlint` e revisão
+# manual, mas nunca rodou de verdade (sem Docker disponível no
+# ambiente onde foi implementado). Recomenda-se testar via
+# `workflow_dispatch` contra um commit já validado em DEV antes de
+# depender dele para uma promoção real.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit já publicado (RAG-072) e validado em DEV (RAG-074) a promover."
+        required: true
+      version:
+        description: "Tag semântica a aplicar às imagens já publicadas desse commit (ex.: v1.2.3, ou v1.2.3-rollback para reverter a um release anterior)."
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  validate:
+    name: Resolver release, validar deploy em DEV e avaliação completa
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: read
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - name: Resolver commit e versão do release
+        id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            sha="${{ inputs.sha }}"
+            version="${{ inputs.version }}"
+          else
+            sha="${{ github.sha }}"
+            version="${{ github.ref_name }}"
+          fi
+          if ! echo "$version" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "Versão '$version' não parece uma tag semântica (esperado vMAJOR.MINOR.PATCH[-sufixo])." >&2
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Release: commit $sha, versão $version"
+
+      # "Selecionar o digest já validado em DEV" (seção 16.4, passo 2):
+      # busca deployments do GitHub para este commit no ambiente
+      # `development` (criados por `deploy-dev.yml`, RAG-074) e exige
+      # que pelo menos um tenha status "success" — nunca promove um
+      # commit que nunca passou por DEV.
+      - name: Confirmar que este commit tem deploy bem-sucedido em DEV
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ steps.resolve.outputs.sha }}
+        run: |
+          deployments=$(gh api "repos/${{ github.repository }}/deployments" \
+            -f sha="$TARGET_SHA" -f environment=development --paginate)
+          ids=$(echo "$deployments" | jq -r '.[].id')
+          if [ -z "$ids" ]; then
+            echo "Nenhum deployment em 'development' encontrado para o commit $TARGET_SHA — rode deploy-dev.yml (RAG-074) para ele antes de liberar um release." >&2
+            exit 1
+          fi
+          found_success=false
+          for id in $ids; do
+            statuses=$(gh api "repos/${{ github.repository }}/deployments/$id/statuses")
+            latest_state=$(echo "$statuses" | jq -r '.[0].state // empty')
+            echo "Deployment $id (development, sha $TARGET_SHA): status mais recente = ${latest_state:-<nenhum>}"
+            if [ "$latest_state" = "success" ]; then
+              found_success=true
+            fi
+          done
+          if [ "$found_success" != "true" ]; then
+            echo "Nenhum deployment em 'development' para $TARGET_SHA tem status 'success' — não promovendo." >&2
+            exit 1
+          fi
+          echo "OK: $TARGET_SHA tem ao menos um deploy bem-sucedido em 'development'."
+
+      - name: Checkout no commit do release
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.resolve.outputs.sha }}
+
+      - name: Configurar Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Instalar dependências
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e ".[dev]"
+
+      - name: Verificar se há um gateway LiteLLM configurado
+        id: check
+        env:
+          LITELLM_BASE_URL: ${{ secrets.LITELLM_BASE_URL }}
+        run: |
+          if [ -z "$LITELLM_BASE_URL" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Nenhum secret LITELLM_BASE_URL configurado — a avaliação completa deste release foi pulada (seção 15 do plano). Configure o secret para que releases futuros sejam avaliados de verdade."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Avaliação COMPLETA (sem --max-cases, ao contrário do quality
+      # gate reduzido de RAG-073) — "executar avaliação completa"
+      # (seção 16.4, passo 3).
+      - name: Avaliação completa de retrieval (RAG-061)
+        id: retrieval_eval
+        if: steps.check.outputs.configured == 'true'
+        continue-on-error: true
+        env:
+          POSTGRES_PASSWORD: "ci-placeholder"
+          MINIO_ROOT_PASSWORD: "ci-placeholder"
+          JWT_ISSUER: "ci-placeholder"
+          JWT_AUDIENCE: "ci-placeholder"
+          LITELLM_BASE_URL: ${{ secrets.LITELLM_BASE_URL }}
+          LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+        run: .venv/bin/python scripts/run_retrieval_evaluation.py
+
+      - name: Avaliação completa de geração (RAG-062)
+        id: generation_eval
+        if: steps.check.outputs.configured == 'true'
+        continue-on-error: true
+        env:
+          POSTGRES_PASSWORD: "ci-placeholder"
+          MINIO_ROOT_PASSWORD: "ci-placeholder"
+          JWT_ISSUER: "ci-placeholder"
+          JWT_AUDIENCE: "ci-placeholder"
+          LITELLM_BASE_URL: ${{ secrets.LITELLM_BASE_URL }}
+          LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+        run: .venv/bin/python scripts/run_generation_evaluation.py
+
+      - name: Verificar regressão contra a baseline aprovada (RAG-063)
+        id: baseline_check
+        if: steps.check.outputs.configured == 'true'
+        continue-on-error: true
+        run: |
+          .venv/bin/python scripts/check_evaluation_baseline.py \
+            --report reports/retrieval-evaluation/retrieval-evaluation.json \
+            --report reports/generation-evaluation/generation-evaluation.json
+
+      - name: Publicar relatórios no resumo do workflow
+        if: steps.check.outputs.configured == 'true' && always()
+        run: |
+          {
+            echo "## Avaliação completa do release ${{ steps.resolve.outputs.version }}"
+            echo
+            echo "### Retrieval (RAG-061)"
+            cat reports/retrieval-evaluation/retrieval-evaluation.md 2>/dev/null \
+              || echo "_relatório não gerado._"
+            echo
+            echo "### Geração (RAG-062)"
+            cat reports/generation-evaluation/generation-evaluation.md 2>/dev/null \
+              || echo "_relatório não gerado._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publicar relatório de gateway não configurado
+        if: steps.check.outputs.configured != 'true'
+        run: |
+          echo "## Avaliação completa pulada — sem gateway LiteLLM configurado (secrets.LITELLM_BASE_URL)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Bloquear release se alguma verificação falhou
+        if: steps.check.outputs.configured == 'true'
+        run: |
+          status=0
+          [ "${{ steps.retrieval_eval.outcome }}" = "success" ] || { echo "Avaliação de retrieval falhou ou ficou abaixo do limiar." >&2; status=1; }
+          [ "${{ steps.generation_eval.outcome }}" = "success" ] || { echo "Avaliação de geração falhou ou ficou abaixo do limiar." >&2; status=1; }
+          [ "${{ steps.baseline_check.outcome }}" = "success" ] || { echo "Verificação de regressão contra a baseline falhou." >&2; status=1; }
+          exit $status
+
+  promote:
+    name: Promover digest (aprovação manual) e validar
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout no commit do release
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+
+      - name: Configurar Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login no GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # "Promover o mesmo digest" (seção 16.4, passo 5) / "não
+      # reconstruir imagem durante promoção" (seção 16.5): copia o
+      # manifesto já publicado sob a tag `sha-<sha>` (RAG-072) para a
+      # tag semântica do release — nenhum rebuild, nenhum novo digest.
+      - name: Promover as imagens já publicadas (sem rebuild)
+        run: |
+          for image in api worker; do
+            src="${{ env.REGISTRY }}/${{ github.repository_owner }}/rag-platform-$image:sha-${{ needs.validate.outputs.sha }}"
+            dst="${{ env.REGISTRY }}/${{ github.repository_owner }}/rag-platform-$image:${{ needs.validate.outputs.version }}"
+            echo "Promovendo $src -> $dst"
+            docker buildx imagetools create --tag "$dst" "$src"
+          done
+
+      - name: Configurar Python (para aplicar as migrations)
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Instalar dependências
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e ".[dev]"
+
+      # Reusa a mesma stack de smoke-deploy de RAG-074
+      # (`deploy/compose/docker-compose.dev.yml`) — só as imagens
+      # mudam (a tag de versão promovida acima, em vez de `sha-<sha>`).
+      # Ver o cabeçalho desse arquivo e de `deploy-dev.yml` para o
+      # racional completo sobre o que "ambiente" significa nesta POC.
+      - name: Subir infraestrutura (Postgres, Redis, MinIO, Ollama, LiteLLM)
+        env:
+          API_IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/rag-platform-api:${{ needs.validate.outputs.version }}
+          WORKER_IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/rag-platform-worker:${{ needs.validate.outputs.version }}
+        run: |
+          docker compose -f deploy/compose/docker-compose.dev.yml up -d --wait \
+            postgres redis minio ollama ollama-pull-embedding-model litellm
+
+      - name: Aplicar migrations (alembic upgrade head)
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: "5432"
+          POSTGRES_USER: rag_platform
+          POSTGRES_PASSWORD: rag_platform_dev_smoke_only
+          POSTGRES_DB: rag_platform
+          MINIO_ROOT_PASSWORD: rag_platform_dev_smoke_only
+          JWT_ISSUER: rag-platform-dev-smoke
+          JWT_AUDIENCE: rag-platform-dev-smoke-api
+        run: .venv/bin/alembic upgrade head
+
+      - name: Subir API e worker (imagem promovida, sem reconstruir)
+        env:
+          API_IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/rag-platform-api:${{ needs.validate.outputs.version }}
+          WORKER_IMAGE: ${{ env.REGISTRY }}/${{ github.repository_owner }}/rag-platform-worker:${{ needs.validate.outputs.version }}
+        run: |
+          docker compose -f deploy/compose/docker-compose.dev.yml up -d --wait api worker
+
+      - name: Smoke test — /health/live e /health/ready
+        run: |
+          set -e
+          live=$(curl -sS -o /tmp/live.json -w "%{http_code}" http://localhost:8000/health/live)
+          echo "GET /health/live -> $live"; cat /tmp/live.json; echo
+          [ "$live" = "200" ]
+
+          ready=$(curl -sS -o /tmp/ready.json -w "%{http_code}" http://localhost:8000/health/ready)
+          echo "GET /health/ready -> $ready"; cat /tmp/ready.json; echo
+          [ "$ready" = "200" ]
+
+      - name: Publicar resumo do release
+        if: always()
+        run: |
+          {
+            echo "## Release ${{ needs.validate.outputs.version }} (RAG-075)"
+            echo
+            echo "**Commit promovido:** \`${{ needs.validate.outputs.sha }}\`"
+            echo "**Imagens:** \`rag-platform-api:${{ needs.validate.outputs.version }}\`, \`rag-platform-worker:${{ needs.validate.outputs.version }}\`"
+            echo "**Resultado:** ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Logs dos serviços (em caso de falha)
+        if: failure()
+        run: docker compose -f deploy/compose/docker-compose.dev.yml logs
+
+      - name: Encerrar a stack efêmera
+        if: always()
+        run: docker compose -f deploy/compose/docker-compose.dev.yml down -v
