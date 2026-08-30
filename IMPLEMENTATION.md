@@ -1710,3 +1710,85 @@ válida/inventada, malformada, repetida, múltiplas distintas), o caso
 especial de `no_evidence_response` (com e sem evidência incluída, com
 espaço nas pontas) e `enforce_groundedness` aplicando ou não o
 fallback.
+
+## Endpoint de consulta com geração (RAG-044)
+
+`POST /v1/knowledge-bases/{id}/query` (seção 10.3/10.5 do plano):
+integra recuperação (RAG-034), montagem de contexto (RAG-041), geração
+(RAG-042) e validação de groundedness (RAG-043), persistindo
+`QueryLog`/`QueryEvidence` (RAG-010) — o par de RAG-034 ("expor
+recuperação sem geração"), agora "com geração". O caso de uso
+(`packages/application/commands/query.py::answer_query`) segue os
+passos 9-14 da seção 12 do plano; os passos 1-8 são inteiramente
+`retrieve_evidence` (RAG-034), reaproveitado sem duplicação.
+
+**Passo 9 (limiar mínimo)**: `Settings.retrieval_minimum_score`
+(default `0.0`) compara o score "efetivo" de cada evidência (o de
+rerank quando reranking rodou de verdade, senão o de retrieval/RRF) —
+os dois nunca estão na mesma escala (RRF fica perto de 0; rerank
+costuma ser 0-1), então o default aceita qualquer evidência não vazia
+sem exigir calibração prévia (mesmo espírito de `reranker_enabled=False`).
+Sem nenhuma evidência acima do limiar — ou com o contexto montado
+(RAG-041) saindo vazio mesmo depois de passar no limiar por score
+individual — nenhuma chamada de geração acontece: a resposta já é
+`no_evidence_response` (RAG-040), registrada com o rótulo
+`NO_GENERATION_MODEL_LABEL` em `QueryLog.model` (nunca um alias de
+modelo que na verdade não foi invocado).
+
+**Passo 10 (orçamento de tokens)**: `Settings.
+generation_context_token_budget` (default `3000`, igual ao default de
+`context_builder.DEFAULT_TOKEN_BUDGET`) — o valor real depende da
+janela de contexto do modelo por trás do alias de geração escolhido.
+
+**Passo 11 (geração)**: alias resolvido pelo router
+(`get_default_generation_model()`/`get_default_generation_fallback_model()`,
+RAG-042) e passado como parâmetro explícito ao caso de uso — nenhum
+código em `packages/application` importa `packages.config.models`
+diretamente (mesma disciplina de decoupling da seção 5.1, aplicada à
+configuração). Uma falha do gateway depois de esgotar tentativas
+(`GenerationError`, RAG-042) vira `ServiceUnavailableError` (503, novo
+em `packages/application/errors.py`) — uma indisponibilidade real de
+infraestrutura, nunca confundida com "resposta sem suporte" (RAG-043,
+que só se aplica a UMA resposta que o modelo de fato gerou).
+
+**Passo 12 (groundedness)**: `enforce_groundedness` (RAG-043). Uma
+resposta é `grounded` quando tem pelo menos uma citação válida e o
+fallback não foi acionado — o próprio texto `no_evidence_response`
+(gerado pelo modelo por conta própria) também não é `grounded` (zero
+citações, mesmo sendo "válido" para RAG-043).
+
+**Citações resolvidas com um novo método de porta**:
+`DocumentRepositoryPort.get_documents_by_chunk_ids()` (novo, RAG-044) —
+o contrato da seção 10.5 do plano pede `document_id`/`document_name`
+por citação, e nenhuma atividade anterior precisou resolver
+`Chunk.version_id` -> `Document` (RAG-034 devolve só o chunk).
+Implementado tanto no fake em memória quanto no adapter Postgres (join
+`chunks` -> `document_versions` -> `documents`); omite silenciosamente
+um `chunk_id` sem documento resolvível, nunca levanta exceção. O
+`excerpt` de cada citação corta o conteúdo do chunk em
+`EXCERPT_MAX_CHARS` (300) caracteres — só para exibição, nunca afeta o
+texto que o modelo recebeu como contexto nem a validação de
+groundedness, que sempre usam o conteúdo completo.
+
+**Persistência (`QueryRepositoryPort`, novo)**: `persist_query()` grava
+`QueryLog` + todas as `QueryEvidence` juntas — sempre TODA a evidência
+recuperada (RAG-034), não só a que entrou no contexto: RAG-061
+(avaliação de retrieval) vai precisar do ranking completo,
+independente de quantas evidências couberam no orçamento de tokens.
+`question_hash` (SHA-256) nunca a pergunta em texto puro (seção 13 do
+plano: "logs não devem guardar... perguntas sensíveis integralmente").
+`trace_id` vem de `packages.observability.tracing.get_current_trace_id()`
+(novo): converte o trace ID de 128 bits do span ativo (OpenTelemetry,
+RAG-052) para `UUID` — fora de um span válido (tracing desligado), o
+resultado é o UUID nulo, um valor previsível, nunca uma exceção.
+
+Testes: `test_query_command.py` (caso de uso, com fakes em memória para
+toda porta — 100% de cobertura), `test_query_router.py` (visão HTTP,
+mesmo padrão de `test_retrieval_router.py`), extensões em
+`test_document_repository_in_memory.py` (`get_documents_by_chunk_ids`),
+novo `test_query_repository_in_memory.py`, e extensões em
+`test_tracing.py` para `get_current_trace_id`. Adapters Postgres novos
+(`adapters/query_repository/postgres.py`, o método novo de
+`adapters/document_repository/postgres.py`) seguem o mesmo padrão já
+estabelecido no projeto: sem teste direto (só integração, RAG-080,
+fecharia essa lacuna) — mypy garante a corretude de tipos.

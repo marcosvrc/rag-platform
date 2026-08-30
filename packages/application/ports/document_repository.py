@@ -21,6 +21,7 @@ o status ao cliente).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -178,6 +179,25 @@ class DocumentRepositoryPort(ABC):
         (via `IndexJob`) neste ponto, ainda não um tenant autenticado.
         Nunca expor isto a um tenant diretamente (isso é RAG-027, que
         faz o isolamento na hora de expor status ao cliente)."""
+
+    @abstractmethod
+    async def get_documents_by_chunk_ids(
+        self, *, chunk_ids: Sequence[UUID]
+    ) -> dict[UUID, Document]:
+        """Resolve, para cada `chunk_id` em `chunk_ids`, o `Document` a
+        que ele pertence (via `Chunk.version_id` -> `DocumentVersion.
+        document_id` -> `Document`) — RAG-044, para montar `document_id`/
+        `document_name` nas citações da resposta de `/v1/query` (seção
+        10.5 do plano). Sem filtro de tenant explícito aqui: quem chama
+        (o caso de uso de RAG-044) só passa chunk IDs que já vieram de
+        uma recuperação isolada por tenant (`retrieve_evidence`) — os
+        mesmos chunks que o tenant atual já tinha permissão de ver.
+
+        Devolve um dict só com os `chunk_id` encontrados — um chunk cujo
+        `Document`/`DocumentVersion` não existir mais (caso extremo,
+        nunca esperado em operação normal) é omitido, nunca levanta
+        exceção; quem chama decide o que fazer com uma citação sem
+        documento resolvido."""
 
     @abstractmethod
     async def get_latest_version(self, *, document_id: UUID) -> DocumentVersion | None:

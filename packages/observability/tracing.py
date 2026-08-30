@@ -57,6 +57,7 @@ hook de captura de corpo/payload é habilitado:
 from __future__ import annotations
 
 import os
+from uuid import UUID
 
 from fastapi import FastAPI
 from opentelemetry import trace
@@ -123,3 +124,20 @@ def instrument_sqlalchemy_engine(engine: Engine) -> None:
     globalmente — porque múltiplos testes recriam o engine cacheado via
     `get_engine.cache_clear()`, ver `tests/unit/test_database.py`)."""
     SQLAlchemyInstrumentor().instrument(engine=engine)
+
+
+def get_current_trace_id() -> UUID:
+    """Trace ID do span ativo no momento da chamada (RAG-044,
+    `QueryLog.trace_id`), convertido de um inteiro de 128 bits (o
+    formato nativo do OpenTelemetry) para `UUID` via `UUID(int=...)` —
+    os dois são só representações diferentes do mesmo tamanho em bits;
+    nenhuma conversão com perda acontece.
+
+    Fora de um span válido — tracing desligado (`_traces_enabled()`
+    falso, tracer no-op padrão) ou chamado fora de uma requisição
+    instrumentada — `get_current_span()` devolve `INVALID_SPAN`, cujo
+    trace ID é sempre 0: o resultado aqui é o UUID nulo
+    (`00000000-0000-0000-0000-000000000000`), um valor previsível que
+    sinaliza "nenhum trace real estava ativo", nunca uma exceção."""
+    span_context = trace.get_current_span().get_span_context()
+    return UUID(int=span_context.trace_id)
