@@ -2403,3 +2403,54 @@ disponível para subir Postgres/pgvector/MinIO/LiteLLM. Recomenda-se
 fortemente rodar `make e2e` localmente (com a stack de pé) antes de
 considerar este critério de aceite satisfeito — a mesma ressalva já
 feita para os workflows de deploy DEV (RAG-074) e release (RAG-075).
+
+## Correção pós-validação de RAG-080: `pytest-asyncio` e isolamento de `.env`
+
+Ao validar `make e2e` de verdade (RAG-080) contra um checkout com
+Docker disponível, dois problemas surgiram — nenhum causado pelo código
+do teste E2E em si, ambos expostos só agora porque é a primeira vez que
+alguém roda a suíte com uma fixture assíncrona geradora de verdade
+(`tests/e2e/conftest.py::api_client`) e com um `.env` real presente no
+repositório:
+
+**1. `pytest-asyncio` incompatível com `pytest` 9** — `pyproject.toml`
+fixava `pytest-asyncio>=0.23,<1.0`, mas as versões 0.23 a 0.26 do
+`pytest-asyncio` exigem `pytest<8.2`/`<9`, incompatível com
+`pytest>=9.0.3` já fixado no projeto. O resolvedor de dependências
+"resolvia" isso escolhendo a versão mais antiga da faixa permitida
+(0.23.3), que tem um bug conhecido com fixtures assíncronas geradoras
+sob `pytest` 9 (`'FixtureDef' object has no attribute 'unittest'`,
+`pytest_asyncio/plugin.py::_asyncgen_fixture_wrapper`). Como nenhum
+teste em `tests/unit` usa esse padrão de fixture, o bug nunca tinha
+aparecido antes de `tests/e2e/conftest.py` (RAG-080). Corrigido
+alargando a faixa para `pytest-asyncio>=1.0,<2.0` — a partir da 1.0 o
+pacote é compatível com `pytest` 9.
+
+**2. Teste de `mint_local_dev_token.py` dependia da ausência de um
+`.env` real** — `tests/unit/test_mint_local_dev_token.py::test_main_returns_one_and_prints_error_on_configuration_error`
+simula `JWT_SECRET` ausente removendo só a variável de ambiente
+(`monkeypatch.delenv`), mas `Settings` (RAG-004) também lê um arquivo
+`.env` (caminho relativo, `env_file=".env"`) — se um `.env` de verdade
+existir no diretório de trabalho (exatamente o que RAG-080 pede para
+criar antes de `make e2e`), `get_settings()` recupera `JWT_SECRET` de
+lá mesmo com a variável removida, e o teste falha (esperava
+`exit_code == 1`, recebia `0`). Nenhum outro teste do arquivo tem esse
+problema: todos os outros definem as variáveis via `monkeypatch.setenv`,
+que tem precedência sobre o arquivo `.env` (ordem de precedência do
+Pydantic Settings) — só o teste do "caminho ausente" depende da
+ausência total da variável em qualquer fonte. Corrigido com
+`monkeypatch.chdir(tmp_path)` nesse teste, isolando-o de qualquer
+`.env` real do repositório — mesmo racional de `load_settings(env_file=None)`
+já documentado em `packages/config/settings.py` para os testes de
+`test_settings.py`.
+
+**Validação**: reproduzido e confirmado o bug do `pytest-asyncio` num
+teste mínimo isolado antes de alterar a versão; suíte `tests/unit`
+completa (740 testes, cobertura 93,43%) rodando com um `.env` real
+presente no diretório de trabalho (mesma condição do ambiente local de
+Marcos); `tests/e2e` agora progride de fato até tentar conectar no
+Postgres (`ConnectionRefusedError` em `127.0.0.1:5432` — confirma que a
+fixture assíncrona não quebra mais antes disso; a stack real continua
+sendo o único jeito de rodar o cenário até o fim, sem Docker
+disponível neste ambiente). `ruff format`/`ruff check`/`mypy` limpos em
+todo o projeto; `bandit`/`pip-audit` sem achados.
