@@ -1527,3 +1527,59 @@ cache por `(id, version)` e imutabilidade — e, construindo
 (pergunta sem resposta com evidência, pergunta respondível sem
 evidência, poucos casos, sem nenhuma pergunta sem resposta, IDs
 duplicados, campo desconhecido rejeitado por `extra="forbid"`).
+## Context builder (RAG-041)
+
+Monta o texto de `CONTEXTO` do prompt de resposta (RAG-040) a partir
+das evidências que o endpoint `retrieve` (RAG-034) já buscou, fundiu
+por RRF (RAG-032) e reordenou pelo reranker (RAG-033) — o passo 10 da
+seção 12 do plano ("montar contexto dentro do orçamento de tokens"),
+o último antes de chamar o modelo (RAG-042).
+
+**Seleção em ordem de `position`, respeitando o orçamento**
+(`packages/generation/context_builder.py::build_context`): percorre as
+evidências da melhor posição para a pior (`position` crescente — `0`
+é o melhor candidato; a lista de entrada não precisa já vir ordenada
+assim, mesma postura defensiva de `retrieve_evidence` reclampando
+`top_k`) e inclui cada uma enquanto ela couber no `token_budget`
+restante — usa `Chunk.token_count`, já calculado na indexação
+(RAG-024), nunca retokeniza o texto aqui. Uma evidência grande demais
+para o orçamento restante é só pulada, nunca trunca o conteúdo do
+chunk para caber: cortar um chunk no meio produziria uma citação
+`[chunk_id]` referenciando um texto que o chunk recuperado, de
+verdade, não contém por inteiro — exatamente o que RAG-043 ("toda
+citação corresponde a chunk recuperado") existe para impedir. Uma
+evidência maior que o orçamento não bloqueia uma evidência menor e
+pior posicionada logo depois dela na lista.
+
+**"evita duplicações excessivas"** (critério de aceite): evidências
+com `chunk.content` idêntico a uma já incluída são descartadas —
+comparação exata, não uma heurística de similaridade (RRF, RAG-032,
+já deduplica o mesmo `chunk_id` repetido nos dois rankings de entrada;
+esta atividade só cobre o caso de dois `chunk_id` diferentes com o
+mesmo texto, por exemplo o mesmo trecho reindexado em duas versões do
+documento).
+
+**Formato de citação compatível com RAG-040**: o texto de contexto usa
+exatamente `[chunk_id] conteúdo`, o formato que `citation_instruction`
+(`config/prompts/answer.v1.yaml`) pede ao modelo para citar — um dos
+testes monta o contexto e chama `PromptTemplate.render()` de verdade
+para travar os dois módulos não divergirem silenciosamente. Não há
+"orçamento padrão de produção" decidido aqui: `token_budget` é sempre
+um parâmetro explícito de quem chama, porque o valor certo depende da
+janela de contexto do modelo que RAG-042 ainda vai escolher —
+`DEFAULT_TOKEN_BUDGET` existe só para testes e chamadas exploratórias.
+
+**Não decide "não há evidência suficiente"**: o limiar mínimo do passo
+9 da seção 12 e a resposta fixa de `no_evidence_response` (seção 12.1)
+não são responsabilidade deste módulo — aqui, nenhuma evidência
+couber no orçamento é uma saída legítima e silenciosa (`context_text`
+vazio); decidir o que fazer com um contexto vazio fica para quem
+monta o endpoint `query` (RAG-043/044).
+
+Testes: `tests/unit/test_context_builder.py` cobre lista vazia,
+evidência que cabe, evidência que estoura o orçamento, evidência
+grande demais não bloqueando uma menor depois dela, orçamento zero,
+deduplicação de conteúdo idêntico, ordenação por `position`
+independente da ordem de entrada, múltiplas evidências preservando
+ordem no texto final, e a integração de formato com
+`PromptTemplate.render()` (RAG-040).
