@@ -1,0 +1,15 @@
+# Alias do modelo-juiz de avaliação de geração (RAG-062), resolvido
+# pelo gateway LiteLLM — mesma convenção de generation.v1.yaml
+# (RAG-042): trocar o modelo por trás deste alias é uma mudança de
+# CONFIGURAÇÃO no gateway LiteLLM, não deste arquivo; uma mudança que
+# precise de um alias novo cria generation-evaluator.v2.yaml, nunca
+# edita este.
+#
+# Deliberadamente um alias PRÓPRIO, nunca o mesmo de generation.v1.yaml
+# — o modelo que avalia uma resposta não deveria ser o mesmo que a
+# gerou (reduz viés de autoavaliação). "Modelo avaliador configurável"
+# (critério de aceite da RAG-062) é justamente poder trocar este alias
+# sem tocar o de geração de resposta.
+id: generation-evaluator
+version: v1
+alias: generation-evaluator-model-alias

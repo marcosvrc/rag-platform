@@ -12,6 +12,7 @@ from packages.config.models import (
     ModelConfig,
     ModelConfigNotFoundError,
     get_default_embedding_model,
+    get_default_generation_evaluator_model,
     get_default_generation_fallback_model,
     get_default_generation_model,
     get_default_reranker_model,
@@ -121,3 +122,26 @@ def test_get_default_generation_fallback_model_retorna_generation_fallback_v1() 
 
     assert config.id == "generation-fallback"
     assert config.version == "v1"
+
+
+def test_load_model_config_generation_evaluator_v1_tem_id_e_versao_corretos() -> None:
+    config = load_model_config("generation-evaluator", "v1")
+
+    assert isinstance(config, ModelConfig)
+    assert config.id == "generation-evaluator"
+    assert config.version == "v1"
+    assert config.alias.strip() != ""
+
+
+def test_get_default_generation_evaluator_model_retorna_generation_evaluator_v1() -> None:
+    config = get_default_generation_evaluator_model()
+
+    assert config.id == "generation-evaluator"
+    assert config.version == "v1"
+
+
+def test_generation_evaluator_alias_is_distinct_from_the_generation_alias() -> None:
+    # Racional documentado em `packages/application/ports/
+    # generation_evaluator.py`: o modelo-juiz nunca deveria ser o mesmo
+    # que o modelo de geração, para reduzir viés de autoavaliação.
+    assert get_default_generation_evaluator_model().alias != get_default_generation_model().alias

@@ -205,3 +205,31 @@ def record_generation_call(
         description="Duração de uma chamada completa a GenerationProviderPort.generate().",
         unit="s",
     ).record(duration_seconds, labels)
+
+
+def record_generation_evaluation_call(
+    *, prompt_tokens: int, completion_tokens: int, duration_seconds: float
+) -> None:
+    """Chamado por `adapters/litellm/generation_evaluator.py:
+    LiteLLMGenerationEvaluator.evaluate` (RAG-062) depois de uma
+    avaliação bem-sucedida — nunca a pergunta, a resposta avaliada nem
+    o conteúdo do contexto, que nunca viram atributo de métrica (mesma
+    disciplina de `record_generation_call`).
+
+    Sem label de fallback (diferente de `record_generation_call`): um
+    modelo-juiz não tem o conceito de alias de contingência (ver
+    docstring de `GenerationEvaluatorPort`) — só um alias, então nenhum
+    label é necessário para diferenciar caminhos."""
+    _meter().create_counter(
+        "rag_platform.generation_evaluation.prompt_tokens",
+        description="Tokens de prompt enviados ao modelo-juiz de avaliação de geração.",
+    ).add(prompt_tokens)
+    _meter().create_counter(
+        "rag_platform.generation_evaluation.completion_tokens",
+        description="Tokens de resposta recebidos do modelo-juiz de avaliação de geração.",
+    ).add(completion_tokens)
+    _meter().create_histogram(
+        "rag_platform.generation_evaluation.request_duration",
+        description="Duração de uma chamada completa a GenerationEvaluatorPort.evaluate().",
+        unit="s",
+    ).record(duration_seconds)

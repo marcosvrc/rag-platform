@@ -1865,6 +1865,90 @@ novo `test_query_repository_in_memory.py`, e extensões em
 estabelecido no projeto: sem teste direto (só integração, RAG-080,
 fecharia essa lacuna) — mypy garante a corretude de tipos.
 
+## Avaliação de geração — faithfulness e answer relevancy (RAG-062)
+
+Mede a qualidade da geração (RAG-040/041/042/043/044) contra o dataset
+dourado (RAG-060): faithfulness (toda alegação da resposta é sustentada
+pelo contexto recuperado, sem alegação inventada) e answer relevancy (a
+resposta de fato responde à pergunta feita) — seção 21 do plano:
+"Faithfulness inicial igual ou superior a 0,85".
+
+**Reusa `answer_query` (RAG-044) sem modificação** — a mesma função que
+o endpoint `/query` chama — para que a avaliação meça exatamente a
+geração de produção (recuperação + contexto + geração + validação de
+groundedness), nunca um caminho de código paralelo só para avaliação;
+mesmo racional de `evaluate_retrieval` (RAG-061) reusar
+`retrieve_evidence` sem modificação.
+
+**`QueryAnswer.context_chunk_contents` (extensão de RAG-044)**: o
+conteúdo dos chunks que de fato entraram no contexto de geração
+(`ContextBuildResult.included_evidence`) agora viaja no resultado do
+caso de uso — existe só para que a avaliação julgue faithfulness contra
+o MESMO contexto que o modelo recebeu, sem rodar a recuperação uma
+segunda vez (o que dobraria o custo de rede de cada caso avaliado).
+Nunca é serializado na resposta HTTP (`apps/api/routers/query.py`
+monta `QueryResponse` campo a campo) — um detalhe interno de avaliação.
+
+**Avaliação via LLM-juiz, atrás de uma porta própria**
+(`GenerationEvaluatorPort`, `packages/application/ports/
+generation_evaluator.py`) — seção 5 do plano, decisão arquitetural
+"Ragas ou DeepEval atrás de interface": o QUE a porta expõe (dois
+scores 0.0-1.0) nunca vaza qual biblioteca ou modelo está por trás. A
+implementação real (`adapters/litellm/generation_evaluator.py`) usa o
+mesmo gateway LiteLLM de RAG-025/030/033/042 com um prompt dedicado
+(`config/prompts/generation-judge.v1.yaml`) que instrui o modelo a
+devolver um JSON estrito `{"faithfulness": ..., "answer_relevancy":
+...}` — este projeto evita dependências pesadas de avaliação sempre que
+um adapter fino resolve (mesmo racional de não baixar o vocabulário do
+`tiktoken`, `packages/ingestion/chunking.py`); nada impede uma
+implementação futura atrás desta MESMA porta usar Ragas/DeepEval de
+verdade.
+
+**"modelo avaliador configurável"** (critério de aceite): alias PRÓPRIO
+(`config/models/generation-evaluator.v1.yaml`,
+`get_default_generation_evaluator_model()`), deliberadamente distinto
+do alias de geração de resposta — o modelo que avalia não deveria ser o
+mesmo que gerou, para reduzir viés de autoavaliação.
+
+**"custos registrados"**: mesmo proxy de custo já estabelecido em toda
+chamada de LLM do projeto (tokens consumidos, não uma tabela de preço
+que este projeto não tem) — `record_generation_evaluation_call`
+(`packages/observability/metrics.py`, novo) segue exatamente o padrão
+de `record_generation_call`, sem label de fallback (um modelo-juiz não
+tem alias de contingência).
+
+**"resultados ligados às versões de prompt/modelo"**:
+`GenerationEvaluationReport` registra o alias de geração, o (id,
+versão) do prompt de resposta, e o alias do modelo-juiz usados numa
+execução — os três valores que, juntos, dizem se um número de
+faithfulness/relevancy é comparável ao de outra execução.
+
+**Decisão de escopo**: `packages/evaluation/generation_evaluation.py`
+define `ThresholdCheck`/`_mean` localmente em vez de importar de
+`packages.evaluation.retrieval_evaluation` (RAG-061) — esta atividade
+depende só de RAG-044/RAG-060 (RAG-061 é uma branch irmã, sem relação
+de dependência declarada), então acoplar as duas branches só para
+reusar ~10 linhas triviais custaria mais do que duplicá-las.
+
+**Execução real fica fora do `pytest` padrão**, mesmo racional de
+`scripts/run_retrieval_evaluation.py` (RAG-061): `scripts/
+run_generation_evaluation.py` sempre usa os adapters LiteLLM reais
+(embeddings, geração e avaliação), exigindo um gateway alcançável;
+persiste o documento de origem via `InMemoryDocumentRepository` (não só
+os chunks brutos em `VectorSearchPort`), já que `answer_query` resolve
+citações via `DocumentRepositoryPort.get_documents_by_chunk_ids`.
+
+Testes: `test_generation_evaluation.py` (orquestração, com fakes em
+memória e um avaliador determinístico próprio do teste — 100% de
+cobertura), `test_generation_report.py` (JSON/Markdown),
+`test_litellm_generation_evaluator.py` (parsing do JSON de scores,
+timeout/retry — mesmo padrão de `test_litellm_generation_provider.py`),
+`test_judge_prompt.py` (carregador do prompt de avaliação, mesmo padrão
+de `test_prompts.py`), extensões em `test_model_config.py`
+(`generation-evaluator`) e `test_query_command.py`
+(`context_chunk_contents`). `scripts/run_generation_evaluation.py` não
+tem teste direto — mesmo padrão já estabelecido para o que exige
+infraestrutura/rede real.
 ## Feedback (RAG-045)
 
 Endpoint `POST /v1/feedback` (seção 10.3 do plano): registra a

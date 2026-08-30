@@ -95,3 +95,13 @@ def get_default_generation_fallback_model() -> ModelConfig:
     ligado; ver docstring de `packages/application/ports/
     generation_provider.py` para o racional completo do fallback."""
     return load_model_config("generation-fallback", "v1")
+
+
+def get_default_generation_evaluator_model() -> ModelConfig:
+    """O alias do modelo-JUIZ de avaliação de geração (RAG-062) —
+    deliberadamente um alias próprio, nunca o mesmo de
+    `get_default_generation_model` (ver docstring de
+    `packages/application/ports/generation_evaluator.py` para o porquê:
+    reduzir viés de autoavaliação). Mesma convenção de
+    `get_default_embedding_model` acima."""
+    return load_model_config("generation-evaluator", "v1")

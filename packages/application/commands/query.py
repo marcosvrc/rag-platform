@@ -23,6 +23,17 @@ partir de `packages.config.models`) em vez deste módulo importar
 de modelo, ver `adapters/litellm/generation_provider.py`) — mesma
 disciplina de decoupling da seção 5.1 do plano, aplicada aqui à
 configuração, não só à infraestrutura de terceiros.
+
+`QueryAnswer.context_chunk_contents` (RAG-062) carrega o conteúdo dos
+chunks que de fato entraram no contexto de geração (`ContextBuildResult.
+included_evidence`, RAG-041) — existe só para que
+`packages.evaluation.generation_evaluation` possa julgar faithfulness
+contra o mesmo contexto que o modelo realmente recebeu, sem precisar
+rodar a recuperação uma segunda vez (o que dobraria o custo de rede de
+cada avaliação). Nunca é serializado na resposta HTTP (`apps/api/
+routers/query.py:_to_response` monta `QueryResponse` campo a campo,
+nunca por conversão automática) — um detalhe interno de avaliação, não
+parte do contrato da seção 10.5 do plano.
 """
 
 from __future__ import annotations
@@ -98,6 +109,7 @@ class QueryAnswer:
     model: str
     token_usage: TokenUsage
     trace_id: UUID
+    context_chunk_contents: tuple[str, ...]
 
 
 def _effective_score(item: RetrievedEvidence) -> float:
@@ -167,6 +179,7 @@ async def _persist_no_generation(
         model=NO_GENERATION_MODEL_LABEL,
         token_usage=query_log.token_usage,
         trace_id=trace_id,
+        context_chunk_contents=(),
     )
 
 
@@ -317,4 +330,7 @@ async def answer_query(
         model=query_log.model,
         token_usage=query_log.token_usage,
         trace_id=trace_id,
+        context_chunk_contents=tuple(
+            item.chunk.content for item in context_result.included_evidence
+        ),
     )
