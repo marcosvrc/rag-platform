@@ -109,6 +109,13 @@ class Settings(BaseSettings):
     # false: reranking é uma melhoria de qualidade opcional, nunca uma
     # dependência obrigatória do fluxo de consulta.
     reranker_enabled: bool = Field(default=False, alias="RERANKER_ENABLED")
+    # RAG-042 — "fallback configurável" (critério de aceite): quando
+    # ligado, `LiteLLMGenerationProvider` tenta o alias de geração de
+    # contingência (`config/models/generation-fallback.v1.yaml`) depois
+    # de esgotar as tentativas no alias principal. Default false, mesmo
+    # espírito de `reranker_enabled`: um fallback é uma rede de segurança
+    # opcional, nunca uma dependência obrigatória do fluxo de geração.
+    generation_fallback_enabled: bool = Field(default=False, alias="GENERATION_FALLBACK_ENABLED")
 
     @property
     def database_url(self) -> str:

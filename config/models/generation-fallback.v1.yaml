@@ -1,0 +1,8 @@
+# Alias de geração de CONTINGÊNCIA (RAG-042): só é resolvido e usado
+# quando `Settings.generation_fallback_enabled` está ligado (default
+# desligado) e o alias principal (generation.v1.yaml) esgota as
+# tentativas configuradas. Mesma convenção de imutabilidade por versão
+# das outras configurações de modelo — ver generation.v1.yaml.
+id: generation-fallback
+version: v1
+alias: generation-fallback-model-alias

@@ -12,6 +12,8 @@ from packages.config.models import (
     ModelConfig,
     ModelConfigNotFoundError,
     get_default_embedding_model,
+    get_default_generation_fallback_model,
+    get_default_generation_model,
     get_default_reranker_model,
     load_model_config,
 )
@@ -87,3 +89,35 @@ def test_model_config_e_imutavel() -> None:
 
     with pytest.raises(ValidationError):
         config.alias = "outro"
+
+
+def test_load_model_config_generation_v1_tem_id_e_versao_corretos() -> None:
+    config = load_model_config("generation", "v1")
+
+    assert isinstance(config, ModelConfig)
+    assert config.id == "generation"
+    assert config.version == "v1"
+    assert config.alias.strip() != ""
+
+
+def test_get_default_generation_model_retorna_generation_v1() -> None:
+    config = get_default_generation_model()
+
+    assert config.id == "generation"
+    assert config.version == "v1"
+
+
+def test_load_model_config_generation_fallback_v1_tem_id_e_versao_corretos() -> None:
+    config = load_model_config("generation-fallback", "v1")
+
+    assert isinstance(config, ModelConfig)
+    assert config.id == "generation-fallback"
+    assert config.version == "v1"
+    assert config.alias.strip() != ""
+
+
+def test_get_default_generation_fallback_model_retorna_generation_fallback_v1() -> None:
+    config = get_default_generation_fallback_model()
+
+    assert config.id == "generation-fallback"
+    assert config.version == "v1"
