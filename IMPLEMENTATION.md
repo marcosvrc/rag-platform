@@ -1652,3 +1652,61 @@ quando é o fallback que responde; o alias de fallback é resolvido uma
 única vez mesmo em chamadas repetidas. `tests/unit/test_model_config.py`
 ganhou os casos equivalentes de `generation`/`generation-fallback` já
 cobertos para `embedding`/`reranker`.
+
+## Validação de groundedness e citações (RAG-043)
+
+Passo 12 do fluxo de consulta (seção 12 do plano): depois do modelo
+responder (RAG-042), valida se a resposta pode ser confiada ao usuário
+— `packages/generation/groundedness.py`. Escopo deliberadamente
+restrito ao que o critério de aceite pede ("toda citação corresponde a
+chunk recuperado; resposta inválida usa fallback seguro"):
+
+- **Valida citações, não afirmações**: `extract_cited_chunk_ids()`
+  reconhece um `[chunk_id]` (formato de `citation_instruction`,
+  RAG-040) só quando o conteúdo entre colchetes é um UUID válido — um
+  colchete que não é uma citação (nota, o que for) é ignorado, nunca
+  tratado como citação inválida. `validate_groundedness()` então
+  compara as citações reconhecidas contra
+  `ContextBuildResult.included_evidence` (RAG-041, os chunks que de
+  fato entraram no contexto que o modelo viu): qualquer citação fora
+  desse conjunto é uma citação inventada. Verificar se o texto ao
+  redor de uma citação está de fato sustentado pelo conteúdo do chunk
+  citado (faithfulness, claim a claim) fica fora do escopo — isso é
+  avaliação (RAG-062, com LLM-juiz e o dataset dourado RAG-060), não
+  uma checagem barata de rodar em toda consulta em produção.
+- **"Resposta sem suporte"** é qualquer resposta com ZERO citações
+  válidas — nenhuma reconhecida, ou nenhuma que corresponda à evidência
+  incluída. Uma citação malformada (UUID errado, formato inventado)
+  nunca casa com nada, então cai no mesmo caminho: não abre uma brecha
+  separada.
+- **Caso especial**: a resposta idêntica (ignorando espaço nas pontas)
+  a `no_evidence_response` (`config/prompts/answer.v1.yaml`, RAG-040) é
+  sempre válida, mesmo sem nenhuma citação e mesmo que
+  `included_evidence` não esteja vazio — o modelo pode legitimamente
+  decidir que o contexto recebido não sustenta uma resposta. Sem esse
+  caso especial o comportamento correto do modelo seria marcado como
+  inválido só por não citar nada (inofensivo no texto final, já que o
+  fallback devolveria a mesma frase, mas contaminaria qualquer
+  auditoria/métrica de groundedness com falsos positivos).
+- **Fallback seguro reaproveita `no_evidence_response`**, a mesma frase
+  que já existe para "não há evidência suficiente" (passo 9, RAG-040) —
+  em vez de inventar uma segunda mensagem. Do ponto de vista de quem
+  pergunta, um threshold de recuperação insuficiente e uma citação
+  inválida são o mesmo desfecho: "não há uma resposta confiável para
+  dar".
+
+`enforce_groundedness()` é a função que RAG-044 chama de fato: valida e
+já devolve o texto final (`GroundednessOutcome.content` — a resposta
+original quando válida, `no_evidence_response` quando não) junto com
+`fallback_applied` e as citações (válidas/inválidas) reconhecidas, para
+auditoria/observabilidade, sem precisar rodar a validação de novo.
+`validate_groundedness()` fica exposta separadamente (só o diagnóstico,
+sem decidir o texto final) para quem quiser inspecionar o resultado
+sem aplicar o fallback.
+
+Testes: `tests/unit/test_groundedness.py` (100% de cobertura) — todas
+as combinações de citação (nenhuma, uma válida, uma inventada, mistura
+válida/inventada, malformada, repetida, múltiplas distintas), o caso
+especial de `no_evidence_response` (com e sem evidência incluída, com
+espaço nas pontas) e `enforce_groundedness` aplicando ou não o
+fallback.
