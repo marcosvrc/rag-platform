@@ -1580,3 +1580,75 @@ cache por `(id, version)` e imutabilidade — e, construindo
 (pergunta sem resposta com evidência, pergunta respondível sem
 evidência, poucos casos, sem nenhuma pergunta sem resposta, IDs
 duplicados, campo desconhecido rejeitado por `extra="forbid"`).
+
+## Geração via LiteLLM (RAG-042)
+
+Porta e adapter de chat completion — o passo "gerar resposta com LLM"
+da seção 12 do plano. `packages/application/ports/generation_provider.py`
+define `GenerationProviderPort.generate(*, prompt: str) -> GenerationResult`;
+`adapters/litellm/generation_provider.py` (`LiteLLMGenerationProvider`)
+implementa contra o mesmo gateway LiteLLM de RAG-025/030/033
+(`POST {base_url}/chat/completions`, formato compatível com OpenAI),
+via `httpx` puro — mesmo racional de "por que não a SDK `litellm`" já
+documentado no adapter de embeddings.
+
+**Prompt como uma única mensagem, não uma lista de mensagens
+estruturada**: `PromptTemplate.render()` (RAG-040) já concatena
+sistema + aviso de conteúdo não confiável + contexto + instrução de
+citação + pergunta numa única string. Este adapter não inventa uma
+divisão paralela em mensagens de sistema/usuário — o texto inteiro
+vira o conteúdo de uma única mensagem `"role": "user"`.
+
+**"usa alias"**: mesmo padrão de RAG-025/033 —
+`packages/config/models.py::get_default_generation_model()`, alias
+carregado de `config/models/generation.v1.yaml`, nunca hardcoded.
+
+**Timeout e retry**: reaproveitam `Settings.litellm_timeout_seconds`/
+`litellm_max_retries` — o mesmo proxy dos outros dois adapters, sem
+configuração separada. Mesma classificação de erro: HTTP 4xx nunca é
+retentado; timeout/HTTP >= 500/erro de conexão/corpo malformado
+esgotam as tentativas antes de levantar `GenerationTimeoutError`/
+`GenerationUnavailableError`.
+
+**"aplica fallback configurável"**: decisão deliberada desta
+atividade, porque o plano não elabora o que "fallback" significa para
+geração especificamente (só há precedente para reranking, RAG-033, que
+tem um estado anterior óbvio para reverter — o ranking RRF que já
+existia antes do reranking ser tentado). Para geração não existe
+"resposta anterior" nenhuma — "falhar de volta para nada" não é uma
+opção. A interpretação adotada: um SEGUNDO alias de modelo
+(`config/models/generation-fallback.v1.yaml`, carregado por
+`get_default_generation_fallback_model()`), ligado por
+`Settings.generation_fallback_enabled` (default `False`, mesmo padrão
+liga/desliga de `Settings.reranker_enabled`). Quando ligado, esgotar as
+tentativas no alias principal não levanta a exceção — o mesmo laço de
+retry roda de novo contra o alias de fallback; só se esse segundo laço
+também esgotar é que a exceção (do fallback) propaga. Quando
+desligado, esgotar o alias principal já levanta a exceção na hora, e o
+arquivo de configuração do fallback nem precisa existir (só é
+resolvido sob demanda, na primeira vez que é de fato necessário).
+
+**"registra uso"**: `GenerationResult` devolve `prompt_tokens`,
+`completion_tokens`, `total_tokens` (repassados pelo gateway) e
+`used_fallback` (qual alias respondeu) — RAG-044 vai persistir isso em
+`QueryLog.token_usage` (coluna já existente desde RAG-010). O adapter
+também emite uma métrica de consumo
+(`packages/observability/metrics.py::record_generation_call`, RAG-053):
+contadores de tokens de prompt/resposta e duração da chamada, rotulados
+por `path` (`"primary"`/`"fallback"` — só 2 valores fixos, mesma
+disciplina de cardinalidade das outras métricas de consumo) — nunca o
+texto do prompt nem o da resposta.
+
+Testes: `tests/unit/test_litellm_generation_provider.py` cobre alias
+enviado, conteúdo da mensagem, uso de token devolvido, retry em erro
+transitório, erro definitivo após esgotar tentativas (timeout, conexão,
+servidor), erro imediato sem retry em HTTP 4xx, corpo malformado
+(incluindo conteúdo que não é texto), header de autorização, métrica de
+consumo — e, especificamente para o fallback: desligado nunca chama o
+alias de contingência; ligado tenta o alias principal primeiro e só
+então o de fallback; erro do fallback (não do principal) é o que
+propaga quando os dois esgotam; métrica registra `used_fallback=True`
+quando é o fallback que responde; o alias de fallback é resolvido uma
+única vez mesmo em chamadas repetidas. `tests/unit/test_model_config.py`
+ganhou os casos equivalentes de `generation`/`generation-fallback` já
+cobertos para `embedding`/`reranker`.

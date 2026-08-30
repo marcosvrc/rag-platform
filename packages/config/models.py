@@ -80,3 +80,18 @@ def get_default_reranker_model() -> ModelConfig:
     """O alias de reranker atualmente usado pela aplicação (RAG-033).
     Mesma convenção de `get_default_embedding_model` acima."""
     return load_model_config("reranker", "v1")
+
+
+def get_default_generation_model() -> ModelConfig:
+    """O alias de geração (chat completion) atualmente usado pela
+    aplicação (RAG-042). Mesma convenção de `get_default_embedding_model`
+    acima."""
+    return load_model_config("generation", "v1")
+
+
+def get_default_generation_fallback_model() -> ModelConfig:
+    """O alias de geração de CONTINGÊNCIA (RAG-042) — só é resolvido por
+    quem chama quando `Settings.generation_fallback_enabled` está
+    ligado; ver docstring de `packages/application/ports/
+    generation_provider.py` para o racional completo do fallback."""
+    return load_model_config("generation-fallback", "v1")

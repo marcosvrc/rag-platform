@@ -1,0 +1,9 @@
+# Alias de geração (chat completion) resolvido pelo gateway LiteLLM
+# (RAG-042), mesma convenção de embedding.v1.yaml (RAG-025) e
+# reranker.v1.yaml (RAG-033): trocar o modelo por trás deste alias é
+# uma mudança de CONFIGURAÇÃO no gateway LiteLLM, não deste arquivo;
+# uma mudança que precise de um alias novo cria generation.v2.yaml,
+# nunca edita este.
+id: generation
+version: v1
+alias: generation-model-alias

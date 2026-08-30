@@ -169,3 +169,39 @@ def record_reranker_call(*, duration_seconds: float) -> None:
         description="Duração de uma chamada completa a RerankerPort.rerank().",
         unit="s",
     ).record(duration_seconds)
+
+
+def record_generation_call(
+    *,
+    used_fallback: bool,
+    prompt_tokens: int,
+    completion_tokens: int,
+    duration_seconds: float,
+) -> None:
+    """Chamado por `adapters/litellm/generation_provider.py:
+    LiteLLMGenerationProvider.generate` (RAG-042) depois de uma resposta
+    bem-sucedida — nunca o texto do prompt nem o da resposta, que nunca
+    viram atributo de métrica (mesma disciplina de
+    `record_reranker_call`).
+
+    `used_fallback` (rotulado como `path`, "primary"/"fallback" — só 2
+    valores fixos, mesma disciplina de cardinalidade de
+    `record_knowledge_base_mutation`) diz qual dos dois aliases
+    respondeu. Token counts entram como o VALOR do contador (mesmo
+    padrão de `record_embedding_batch` somando `text_count`, não só
+    incrementando 1) — o critério de aceite "registra uso" é sobre o
+    volume de tokens consumidos, não sobre a contagem de chamadas."""
+    labels = {"path": "fallback" if used_fallback else "primary"}
+    _meter().create_counter(
+        "rag_platform.generation.prompt_tokens",
+        description="Tokens de prompt enviados ao gateway de geração.",
+    ).add(prompt_tokens, labels)
+    _meter().create_counter(
+        "rag_platform.generation.completion_tokens",
+        description="Tokens de resposta recebidos do gateway de geração.",
+    ).add(completion_tokens, labels)
+    _meter().create_histogram(
+        "rag_platform.generation.request_duration",
+        description="Duração de uma chamada completa a GenerationProviderPort.generate().",
+        unit="s",
+    ).record(duration_seconds, labels)
