@@ -1653,6 +1653,78 @@ quando é o fallback que responde; o alias de fallback é resolvido uma
 ganhou os casos equivalentes de `generation`/`generation-fallback` já
 cobertos para `embedding`/`reranker`.
 
+## Avaliação de retrieval — Recall@K e MRR (RAG-061)
+
+Mede a qualidade do retrieval (RAG-030/031/032/033) contra o dataset
+dourado (RAG-060): Recall@K (fração das evidências esperadas de cada
+caso encontrada entre os `K` chunks recuperados) e MRR — Mean
+Reciprocal Rank (posição da primeira evidência relevante, invertida e
+com média sobre os casos), seção 21 do plano ("Recall@5 inicial igual
+ou superior a 0,80", "MRR inicial igual ou superior a 0,70").
+
+**Correspondência por conteúdo, nunca por `chunk_id`**: `ExpectedEvidence`
+(RAG-060) não referencia um `chunk_id` — um UUID gerado só na indexação,
+que muda a cada reindexação/ambiente. `packages/evaluation/
+retrieval_metrics.py` casa um chunk recuperado de verdade contra a
+expectativa de um caso checando se `content_contains` aparece como
+substring do conteúdo recuperado, mesmo critério já usado por RAG-060
+para validar a consistência do próprio dataset contra o README.
+
+**Só casos respondíveis**: `evaluate_retrieval`
+(`packages/evaluation/retrieval_evaluation.py`) considera apenas os
+casos com `expected_evidence` não vazio — uma "pergunta sem resposta"
+(RAG-060) não tem evidência esperada para medir recall/MRR contra ela;
+essas perguntas verificam a recusa de geração (RAG-043/RAG-062), não a
+qualidade do retrieval. Levanta `EmptyEvaluationError` se nenhum caso
+do dataset for respondível.
+
+**Reusa `retrieve_evidence` (RAG-034) sem modificação** — a mesma
+função que o endpoint `/retrieve` chama, para que a avaliação meça
+exatamente o retrieval de produção (busca vetorial + lexical, fusão
+RRF, reranking opcional), nunca um caminho de código paralelo só para
+avaliação.
+
+**Limiar configurável** (critério de aceite "falha por limiar
+configurável"): `check_thresholds` recebe `minimum_recall_at_k`/
+`minimum_mrr` de quem chama — nenhum valor de negócio é hardcoded
+dentro de `retrieval_evaluation.py`; os defaults (0,80/0,70, seção 21
+do plano) vivem só em `scripts/run_retrieval_evaluation.py`, como
+flags de linha de comando.
+
+**Relatório JSON e Markdown** (critério de aceite): `packages/
+evaluation/retrieval_report.py` serializa `RetrievalEvaluationReport`
+nos dois formatos — JSON com só tipos nativos (sem `UUID`/`datetime`
+crus) para consumo por ferramenta (ex.: um passo de CI, RAG-073);
+Markdown com o resumo agregado, o veredito do limiar e uma tabela por
+caso, para leitura humana.
+
+**Execução reproduzível, mas com um requisito deliberado**:
+`scripts/run_retrieval_evaluation.py` chunka o mesmo README.md contra o
+qual o dataset dourado foi curado (RAG-024, `chunk_document` com os
+defaults de produção), indexa os chunks em `InMemoryVectorSearch`/
+`InMemoryLexicalSearch` (sem tocar Postgres/MinIO) e roda
+`evaluate_retrieval` contra eles. Sempre usa `LiteLLMEmbeddingProvider`
+real (nunca um fake) — um número de Recall@K/MRR só significa algo com
+embeddings de verdade (seção 21 do plano fixa metas concretas); isso
+exige um gateway LiteLLM alcançável, então este script nunca roda como
+parte de `pytest tests/unit` (seção 15 do plano: "chamadas reais ficam
+em workflow manual ou agendado com orçamento limitado") — rodá-lo de
+verdade fica para RAG-073 (quality gate de RAG no CI, ainda não
+implementado) ou uma execução manual/agendada. Reranking fica
+desativado por padrão (`--reranker passthrough`, sem depender de um
+segundo gateway); `--reranker litellm` inclui reranking real.
+
+Testes: `test_retrieval_metrics.py` (funções puras — 100% de
+cobertura), `test_retrieval_evaluation.py` (`evaluate_retrieval`/
+`check_thresholds`, com portas fake em memória e um provedor de
+embeddings determinístico próprio do teste — vetores "one-hot"
+ortogonais por tópico, dando controle total sobre qual chunk cada
+pergunta recupera sem depender de nenhum modelo real), e
+`test_retrieval_report.py` (JSON/Markdown). `scripts/
+run_retrieval_evaluation.py` não tem teste direto — mesmo padrão já
+estabelecido no projeto para o que exige infraestrutura/rede real
+(adapters Postgres, RAG-044): mypy garante a corretude de tipos, a
+execução de verdade é responsabilidade de RAG-073/manual.
 ## Validação de groundedness e citações (RAG-043)
 
 Passo 12 do fluxo de consulta (seção 12 do plano): depois do modelo
@@ -1877,3 +1949,59 @@ de `test_prompts.py`), extensões em `test_model_config.py`
 (`context_chunk_contents`). `scripts/run_generation_evaluation.py` não
 tem teste direto — mesmo padrão já estabelecido para o que exige
 infraestrutura/rede real.
+## Feedback (RAG-045)
+
+Endpoint `POST /v1/feedback` (seção 10.3 do plano): registra a
+avaliação do usuário (`Feedback`, seção 9 do plano; já modelado desde
+RAG-010, tabela `feedbacks` já migrada em RAG-011/migração 0002 — esta
+atividade não precisa de migração nova) sobre uma resposta já dada por
+`POST .../query` (RAG-044).
+
+**Standalone, não aninhado sob uma base de conhecimento**:
+`/v1/feedback` recebe `query_id` no corpo — a base de conhecimento já
+está implícita no `QueryLog` correspondente, então não há necessidade
+de `knowledge_base_id` na URL nem no payload.
+
+**`get_query_log`/`persist_feedback` vivem em `QueryRepositoryPort`**,
+não em uma porta nova: `Feedback` é sempre subordinado a um `QueryLog`
+já existente (FK `query_id`, `ondelete=CASCADE`), mesmo racional de
+`DocumentRepositoryPort` reunir `Document`+`DocumentVersion`+`IndexJob`
+numa porta só. `get_query_log` não filtra por tenant no nível da porta
+(mesmo padrão de `DocumentRepositoryPort.get_document`) — quem decide
+se o `tenant_id` do `QueryLog` encontrado corresponde ao do tenant
+autenticado é o caso de uso.
+
+**"respeita tenant; não permite feedback para query alheia"** (critério
+de aceite): `submit_feedback` (`packages/application/commands/
+feedback.py`) resolve `query_id` via `get_query_log` e levanta
+`NotFoundError` (404) tanto para uma consulta inexistente quanto para
+uma consulta de outro tenant — exatamente o mesmo erro nos dois casos,
+mesma disciplina "404, nunca 403" de todo o resto da API
+(RAG-012/RAG-021/RAG-034/RAG-044).
+
+**"valida rating e motivo"** (critério de aceite), interpretado nesta
+atividade como: `rating` só aceita os dois valores de `FeedbackRating`
+— qualquer outra string já é 422 automaticamente pela validação de
+enum do Pydantic, sem lógica extra necessária; `reason` é obrigatório
+quando `rating == NEGATIVE` (`model_validator` em
+`packages/contracts/feedback.py::FeedbackRequest`) — decisão desta
+atividade, já que o plano não elabora o que "validar motivo" significa
+concretamente, e um feedback negativo sem motivo não é acionável para
+quem for revisar a resposta depois. Para `POSITIVE`, `reason` continua
+opcional. Essa validação é de forma/contrato (422 na borda HTTP), não
+uma regra de negócio do caso de uso — mesma disciplina já usada no
+resto da API (validação de payload no contrato, regra de negócio no
+caso de uso).
+
+Testes: `test_feedback_command.py` (caso de uso, com fake em memória —
+100% de cobertura), `test_feedback_router.py` (visão HTTP, mesmo padrão
+de `test_query_router.py` — semeia um `QueryLog` diretamente via
+`InMemoryQueryRepository.persist_query`, sem precisar rodar o pipeline
+completo de consulta nem criar uma base de conhecimento), extensões em
+`test_query_repository_in_memory.py` para `get_query_log`/
+`persist_feedback`. O método novo de `adapters/query_repository/
+postgres.py` segue o mesmo padrão já estabelecido no projeto: sem teste
+direto (só integração, RAG-080, fecharia essa lacuna) — mypy garante a
+corretude de tipos.
+
+Com RAG-045, a épica E4 (Geração fundamentada) está completa.
