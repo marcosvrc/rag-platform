@@ -145,6 +145,7 @@ async def evaluate_generation(
     top_k: int,
     retrieval_minimum_score: float,
     context_token_budget: int,
+    max_cases: int | None = None,
 ) -> GenerationEvaluationReport:
     """Avalia a geração configurada (as portas recebidas, já apontando
     para o corpus de referência já indexado) contra `dataset`.
@@ -154,13 +155,21 @@ async def evaluate_generation(
     (`packages.evaluation.retrieval_evaluation`): uma "pergunta sem
     resposta" (RAG-060) não tem o que julgar por faithfulness/relevancy
     contra uma resposta esperada, já que ela não tem uma. Levanta
-    `EmptyEvaluationError` se nenhum caso do dataset for respondível."""
+    `EmptyEvaluationError` se nenhum caso do dataset for respondível.
+
+    `max_cases` (RAG-073): mesmo racional e comportamento do parâmetro
+    homônimo de `evaluate_retrieval` — reduz quantos casos respondíveis
+    são de fato processados (cada um custa uma geração real e um
+    julgamento real), sem exigir um dataset dourado menor. `None`
+    (default) avalia todos os casos respondíveis."""
     answerable_cases = [case for case in dataset.cases if case.expected_evidence]
     if not answerable_cases:
         raise EmptyEvaluationError(
             f"Dataset '{dataset.id}' versão '{dataset.version}' não tem nenhum "
             "caso com expected_evidence — nada para avaliar."
         )
+    if max_cases is not None:
+        answerable_cases = answerable_cases[:max_cases]
 
     case_results: list[CaseGenerationResult] = []
     for case in answerable_cases:

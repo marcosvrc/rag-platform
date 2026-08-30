@@ -17,8 +17,9 @@ Por isso este script sempre usa os adapters LiteLLM reais (embeddings,
 geração e avaliação), exigindo um gateway alcançável — nunca roda como
 parte de `pytest tests/unit` (seção 15 do plano: "chamadas reais ficam
 em workflow manual ou agendado com orçamento limitado"). Rodar isso de
-verdade fica para RAG-073 (quality gate de RAG no CI, ainda não
-implementado) ou uma execução manual.
+verdade acontece no quality gate de CI (RAG-073,
+`.github/workflows/rag-quality-gate.yml`, com `--max-cases` reduzindo o
+orçamento de chamadas reais) ou por execução manual.
 
 ## Corpus de referência
 
@@ -92,6 +93,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--minimum-faithfulness", type=float, default=_DEFAULT_MINIMUM_FAITHFULNESS)
     parser.add_argument(
         "--minimum-answer-relevancy", type=float, default=_DEFAULT_MINIMUM_ANSWER_RELEVANCY
+    )
+    parser.add_argument(
+        "--max-cases",
+        type=int,
+        default=None,
+        help=(
+            "Avalia só os N primeiros casos respondíveis do dataset, não o dataset inteiro "
+            "(RAG-073: 'avaliação reduzida' do quality gate de CI). Default: sem limite."
+        ),
     )
     parser.add_argument(
         "--reranker",
@@ -229,6 +239,7 @@ async def _run(args: argparse.Namespace) -> int:
         top_k=args.top_k,
         retrieval_minimum_score=args.retrieval_minimum_score,
         context_token_budget=args.context_token_budget,
+        max_cases=args.max_cases,
     )
 
     threshold_check = check_thresholds(

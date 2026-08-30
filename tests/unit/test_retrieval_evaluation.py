@@ -308,6 +308,67 @@ class TestEvaluateRetrieval:
         assert special_result.reciprocal_rank == pytest.approx(0.0)
         assert special_result.retrieved_chunk_count == 5
 
+    async def test_max_cases_limits_how_many_answerable_cases_are_evaluated(
+        self,
+        knowledge_base_repository: InMemoryKnowledgeBaseRepository,
+        vector_search: InMemoryVectorSearch,
+        lexical_search: InMemoryLexicalSearch,
+    ) -> None:
+        knowledge_base_id = await _seed_knowledge_base(knowledge_base_repository)
+        dataset, vector_by_text = _build_dataset(special_cases=[])
+        _index_filler_chunks(
+            vector_search, vector_by_text, tenant_id=TENANT_ID, knowledge_base_id=knowledge_base_id
+        )
+
+        report = await evaluate_retrieval(
+            dataset=dataset,
+            knowledge_base_repository=knowledge_base_repository,
+            embedding_provider=_FakeEmbeddingProvider(vector_by_text),
+            vector_search=vector_search,
+            lexical_search=lexical_search,
+            reranker=PassthroughReranker(),
+            reranker_enabled=False,
+            tenant_id=TENANT_ID,
+            knowledge_base_id=knowledge_base_id,
+            top_k=5,
+            max_cases=3,
+        )
+
+        assert report.evaluated_case_count == 3
+        assert [case.case_id for case in report.case_results] == [
+            "filler-0",
+            "filler-1",
+            "filler-2",
+        ]
+
+    async def test_max_cases_larger_than_the_dataset_evaluates_all_answerable_cases(
+        self,
+        knowledge_base_repository: InMemoryKnowledgeBaseRepository,
+        vector_search: InMemoryVectorSearch,
+        lexical_search: InMemoryLexicalSearch,
+    ) -> None:
+        knowledge_base_id = await _seed_knowledge_base(knowledge_base_repository)
+        dataset, vector_by_text = _build_dataset(special_cases=[])
+        _index_filler_chunks(
+            vector_search, vector_by_text, tenant_id=TENANT_ID, knowledge_base_id=knowledge_base_id
+        )
+
+        report = await evaluate_retrieval(
+            dataset=dataset,
+            knowledge_base_repository=knowledge_base_repository,
+            embedding_provider=_FakeEmbeddingProvider(vector_by_text),
+            vector_search=vector_search,
+            lexical_search=lexical_search,
+            reranker=PassthroughReranker(),
+            reranker_enabled=False,
+            tenant_id=TENANT_ID,
+            knowledge_base_id=knowledge_base_id,
+            top_k=5,
+            max_cases=_FILLER_TOPIC_COUNT + 1000,
+        )
+
+        assert report.evaluated_case_count == _FILLER_TOPIC_COUNT
+
 
 def _report(*, recall_at_k: float, mrr: float) -> RetrievalEvaluationReport:
     return RetrievalEvaluationReport(

@@ -81,6 +81,7 @@ async def evaluate_retrieval(
     tenant_id: UUID,
     knowledge_base_id: UUID,
     top_k: int,
+    max_cases: int | None = None,
 ) -> RetrievalEvaluationReport:
     """Avalia o retrieval configurado (as portas recebidas, já
     populadas com o corpus de referência) contra `dataset`.
@@ -92,13 +93,25 @@ async def evaluate_retrieval(
     retrieval. Levanta `EmptyEvaluationError` se nenhum caso do dataset
     tiver `expected_evidence` (dataset mal formado para este propósito —
     o schema, RAG-060, já garante um mínimo de 30 casos e ao menos um
-    sem resposta, mas não garante ao menos um COM resposta)."""
+    sem resposta, mas não garante ao menos um COM resposta).
+
+    `max_cases` (RAG-073, "executar avaliação reduzida em mudanças
+    relevantes"): quando informado, avalia só os primeiros `max_cases`
+    casos respondíveis (na ordem de `dataset.cases`), não o dataset
+    inteiro — usado pelo quality gate de CI para manter o orçamento de
+    chamadas reais pequeno em toda PR relevante, sem exigir um dataset
+    dourado menor (que violaria o mínimo de 30 casos do schema,
+    RAG-060). `None` (default) avalia todos os casos respondíveis —
+    comportamento inalterado para quem já chamava esta função antes de
+    RAG-073."""
     answerable_cases = [case for case in dataset.cases if case.expected_evidence]
     if not answerable_cases:
         raise EmptyEvaluationError(
             f"Dataset '{dataset.id}' versão '{dataset.version}' não tem nenhum "
             "caso com expected_evidence — nada para avaliar."
         )
+    if max_cases is not None:
+        answerable_cases = answerable_cases[:max_cases]
 
     case_results: list[CaseRetrievalResult] = []
     for case in answerable_cases:

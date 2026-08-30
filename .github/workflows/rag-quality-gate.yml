@@ -1,0 +1,224 @@
+# RAG-073 — Quality gate de RAG no CI.
+#
+# Executa uma avaliação REDUZIDA (Recall@K/MRR, RAG-061; faithfulness/
+# answer relevancy, RAG-062) e verifica regressão contra a baseline
+# aprovada (RAG-063) em toda PR que toca código/config relevante para o
+# RAG (`paths` abaixo) — e sob demanda via `workflow_dispatch`. Convive
+# com `pull-request.yml` (RAG-070, lint/tipos/testes/migrations) e
+# `security.yml` (RAG-071); nenhum dos dois roda nenhum modelo real.
+#
+# "Reduzida" (seção 15 do plano: "Provedores de LLM devem ser
+# simulados no CI comum. Chamadas reais ficam em workflow manual ou
+# agendado com orçamento limitado"): este workflow É o "manual ou
+# agendado com orçamento limitado" que a seção 15 permite — mas em vez
+# de deixá-lo só manual/agendado, ele também reage a PRs relevantes
+# (via `paths`, critério de aceite desta atividade), com o orçamento
+# limitado pelo `--max-cases` dos scripts de avaliação (RAG-061/062):
+# só os N primeiros casos respondíveis do dataset dourado são
+# processados (default 3), nunca os ~35 do dataset inteiro. Uma
+# avaliação completa continua sendo uma execução manual dos scripts
+# sem `--max-cases`, fora deste workflow.
+#
+# Sem gateway configurado, pula sem bloquear: este repositório ainda
+# não tem nenhum secret de gateway LiteLLM real cadastrado (nenhum
+# workflow existente usa `secrets.*` além do `GITHUB_TOKEN` embutido) —
+# rodar os scripts sem um gateway alcançável falharia com erro de
+# conexão, não com uma métrica abaixo do limiar, o que bloquearia toda
+# PR relevante por um motivo de infraestrutura, não de qualidade. O job
+# checa a presença de `secrets.LITELLM_BASE_URL` antes de tentar
+# qualquer chamada real; se ausente, publica um aviso no resumo do
+# workflow e termina com sucesso. Quando um gateway real for
+# provisionado para o CI, cadastrar `LITELLM_BASE_URL` (e
+# `LITELLM_API_KEY`, se o gateway exigir) como secrets do repositório
+# ativa as chamadas de verdade sem nenhuma mudança neste arquivo.
+name: RAG Quality Gate
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      # Código de retrieval, geração e avaliação.
+      - "packages/retrieval/**"
+      - "packages/generation/**"
+      - "packages/evaluation/**"
+      - "packages/application/queries/retrieval.py"
+      - "packages/application/commands/query.py"
+      - "adapters/vector_search/**"
+      - "adapters/lexical_search/**"
+      - "adapters/reranker/**"
+      - "adapters/litellm/**"
+      # Prompts e modelos versionados (seção 8 do plano).
+      - "config/prompts/**"
+      - "config/models/**"
+      - "config/evaluation/**"
+      # Dataset dourado e o próprio workflow.
+      - "datasets/golden/**"
+      - "scripts/run_retrieval_evaluation.py"
+      - "scripts/run_generation_evaluation.py"
+      - "scripts/check_evaluation_baseline.py"
+      - ".github/workflows/rag-quality-gate.yml"
+  workflow_dispatch:
+    inputs:
+      max_cases:
+        description: >-
+          Quantos dos primeiros casos respondíveis do dataset dourado avaliar
+          (vazio = usa o default reduzido de 3; 0 ou negativo não é válido).
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rag-quality-gate-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  #: Seção 21 do plano — "avaliação reduzida" (RAG-073) usa este
+  #: número de casos por padrão; `workflow_dispatch` pode informar um
+  #: valor diferente para uma checagem manual mais ampla.
+  DEFAULT_MAX_CASES: "3"
+
+jobs:
+  quality-gate:
+    name: Avaliação reduzida (retrieval + geração) e regressão contra a baseline
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Configurar Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Instalar dependências
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e ".[dev]"
+
+      - name: Verificar se há um gateway LiteLLM configurado
+        id: check
+        env:
+          LITELLM_BASE_URL: ${{ secrets.LITELLM_BASE_URL }}
+        run: |
+          if [ -z "$LITELLM_BASE_URL" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Nenhum secret LITELLM_BASE_URL configurado — o quality gate de RAG (RAG-073) não tem gateway real para chamar nesta execução, então foi pulado sem bloquear o merge (seção 15 do plano)."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Determinar quantos casos avaliar (reduzido)
+        id: params
+        run: |
+          if [ -n "${{ inputs.max_cases }}" ]; then
+            echo "max_cases=${{ inputs.max_cases }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "max_cases=${{ env.DEFAULT_MAX_CASES }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # `POSTGRES_PASSWORD`/`MINIO_ROOT_PASSWORD`/`JWT_ISSUER`/
+      # `JWT_AUDIENCE` são placeholders fictícios: `Settings` (RAG-004)
+      # exige todos os campos obrigatórios para montar, mesmo os que
+      # `run_retrieval_evaluation.py` nunca usa de verdade (não toca
+      # Postgres/MinIO/JWT) — mesmo padrão já usado no job `migrations`
+      # de `pull-request.yml` (RAG-070).
+      - name: Avaliação de retrieval — Recall@K, MRR (RAG-061, reduzida)
+        id: retrieval_eval
+        if: steps.check.outputs.configured == 'true'
+        continue-on-error: true
+        env:
+          POSTGRES_PASSWORD: "ci-placeholder"
+          MINIO_ROOT_PASSWORD: "ci-placeholder"
+          JWT_ISSUER: "ci-placeholder"
+          JWT_AUDIENCE: "ci-placeholder"
+          LITELLM_BASE_URL: ${{ secrets.LITELLM_BASE_URL }}
+          LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+        run: |
+          .venv/bin/python scripts/run_retrieval_evaluation.py \
+            --max-cases "${{ steps.params.outputs.max_cases }}"
+
+      - name: Avaliação de geração — faithfulness, answer relevancy (RAG-062, reduzida)
+        id: generation_eval
+        if: steps.check.outputs.configured == 'true'
+        continue-on-error: true
+        env:
+          POSTGRES_PASSWORD: "ci-placeholder"
+          MINIO_ROOT_PASSWORD: "ci-placeholder"
+          JWT_ISSUER: "ci-placeholder"
+          JWT_AUDIENCE: "ci-placeholder"
+          LITELLM_BASE_URL: ${{ secrets.LITELLM_BASE_URL }}
+          LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+        run: |
+          .venv/bin/python scripts/run_generation_evaluation.py \
+            --max-cases "${{ steps.params.outputs.max_cases }}"
+
+      - name: Verificar regressão contra a baseline aprovada (RAG-063)
+        id: baseline_check
+        if: steps.check.outputs.configured == 'true'
+        continue-on-error: true
+        run: |
+          .venv/bin/python scripts/check_evaluation_baseline.py \
+            --report reports/retrieval-evaluation/retrieval-evaluation.json \
+            --report reports/generation-evaluation/generation-evaluation.json
+
+      - name: Publicar relatórios no resumo do workflow
+        if: steps.check.outputs.configured == 'true' && always()
+        run: |
+          {
+            echo "## Quality gate de RAG (RAG-073) — avaliação reduzida (${{ steps.params.outputs.max_cases }} caso(s))"
+            echo
+            echo "### Retrieval (RAG-061)"
+            cat reports/retrieval-evaluation/retrieval-evaluation.md 2>/dev/null \
+              || echo "_relatório não gerado — veja o log do passo de avaliação de retrieval._"
+            echo
+            echo "### Geração (RAG-062)"
+            cat reports/generation-evaluation/generation-evaluation.md 2>/dev/null \
+              || echo "_relatório não gerado — veja o log do passo de avaliação de geração._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publicar relatório de gateway não configurado
+        if: steps.check.outputs.configured != 'true'
+        run: |
+          {
+            echo "## Quality gate de RAG (RAG-073)"
+            echo
+            echo "Pulado: nenhum secret \`LITELLM_BASE_URL\` configurado neste repositório —"
+            echo "sem um gateway alcançável, não há como chamar embeddings/geração/avaliação de"
+            echo "verdade (seção 15 do plano). Cadastrar o secret ativa esta verificação."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publicar relatórios como artefatos
+        if: steps.check.outputs.configured == 'true' && always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: rag-quality-gate-reports
+          path: |
+            reports/retrieval-evaluation/
+            reports/generation-evaluation/
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Bloquear PR se alguma verificação falhou
+        if: steps.check.outputs.configured == 'true'
+        run: |
+          status=0
+          if [ "${{ steps.retrieval_eval.outcome }}" != "success" ]; then
+            echo "Avaliação de retrieval falhou ou ficou abaixo do limiar (RAG-061)." >&2
+            status=1
+          fi
+          if [ "${{ steps.generation_eval.outcome }}" != "success" ]; then
+            echo "Avaliação de geração falhou ou ficou abaixo do limiar (RAG-062)." >&2
+            status=1
+          fi
+          if [ "${{ steps.baseline_check.outcome }}" != "success" ]; then
+            echo "Verificação de regressão contra a baseline falhou (RAG-063)." >&2
+            status=1
+          fi
+          exit $status
