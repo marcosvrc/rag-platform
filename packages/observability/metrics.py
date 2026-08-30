@@ -155,3 +155,17 @@ def record_embedding_batch(*, text_count: int, duration_seconds: float) -> None:
         description="Duração de uma chamada completa a EmbeddingProviderPort.embed().",
         unit="s",
     ).record(duration_seconds)
+
+
+def record_reranker_call(*, duration_seconds: float) -> None:
+    """Chamado por `adapters/reranker/litellm.py:LiteLLMReranker.rerank`
+    (RAG-033) — nunca por `PassthroughReranker`, que não faz nenhuma
+    chamada de rede. Sem contagem de documentos nem de labels: a
+    duração por si só já é o sinal de consumo relevante aqui, e nem o
+    texto dos chunks nem a query viram atributo de métrica (critério
+    de aceite "registra latência sem registrar texto sensível")."""
+    _meter().create_histogram(
+        "rag_platform.reranker.request_duration",
+        description="Duração de uma chamada completa a RerankerPort.rerank().",
+        unit="s",
+    ).record(duration_seconds)
