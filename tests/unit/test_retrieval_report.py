@@ -95,6 +95,11 @@ class TestRenderMarkdown:
         assert "MRR: 0.8000" in rendered
         assert "Casos avaliados: 2" in rendered
 
+    def test_does_not_duplicate_the_v_prefix_already_in_the_version_string(self) -> None:
+        rendered = retrieval_report.render_markdown(_report())
+
+        assert "vv1" not in rendered
+
     def test_includes_a_row_per_case(self) -> None:
         rendered = retrieval_report.render_markdown(_report())
 

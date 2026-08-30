@@ -62,7 +62,7 @@ def render_markdown(
     tabela por caso para depuração (qual caso específico puxou a média
     para baixo)."""
     lines = [
-        f"# Avaliação de retrieval — dataset `{report.dataset_id}` v{report.dataset_version}",
+        f"# Avaliação de retrieval — dataset `{report.dataset_id}` {report.dataset_version}",
         "",
         f"- Gerado em: {report.generated_at.isoformat()}",
         f"- Casos avaliados: {report.evaluated_case_count}",
