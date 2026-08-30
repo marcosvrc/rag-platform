@@ -2005,3 +2005,81 @@ direto (só integração, RAG-080, fecharia essa lacuna) — mypy garante a
 corretude de tipos.
 
 Com RAG-045, a épica E4 (Geração fundamentada) está completa.
+
+## Baseline da POC e verificação de regressão (RAG-063)
+
+Objetivo (seção 21 do plano, "Requisitos de desempenho iniciais"):
+`Recall@5 >= 0,80`, `MRR >= 0,70`, `Faithfulness >= 0,85`, "Regressão
+máxima permitida de 5% contra a baseline aprovada".
+
+**Decisão de escopo — por que este módulo não importa nada de
+RAG-061/RAG-062.** O plano lista "Dependências: RAG-061, RAG-062" para
+esta atividade, mas as duas vivem em branches irmãs ainda não
+mescladas (`feat/rag-061-retrieval-evaluation`, ramificada de
+`master`, e `feat/rag-062-generation-evaluation`, empilhada sobre a
+pilha de RAG-043/044) — nenhuma contém a outra; importar diretamente
+`RetrievalEvaluationReport`/`GenerationEvaluationReport` exigiria
+mesclar as três branches juntas antes de qualquer PR poder ser aberto
+isoladamente (o mesmo problema de import cruzado já resolvido dentro
+de RAG-062 propriamente, ver seção "Avaliação de geração" acima).
+`packages/evaluation/baseline.py` resolve isso operando sobre
+`dict[str, float]` genérico: exatamente o formato que
+`report_to_dict()` de ambos os relatórios já produz como chaves de
+nível superior (`recall_at_k`, `mrr`, `faithfulness`,
+`answer_relevancy`). Isso satisfaz a dependência no nível dos DADOS
+(a baseline representa as métricas que RAG-061/062 medem) sem
+acoplamento de CÓDIGO entre as três branches — RAG-063 foi ramificada
+diretamente de `master`, tão independente quanto RAG-061.
+
+**Schema `Baseline`** (`config/evaluation/<id>.<version>.yaml`, mesma
+convenção de versão imutável de `packages/generation/prompts.py` e
+`packages/evaluation/golden_dataset.py`): `id`, `version`, `measured`
+(bool), `max_regression_pct` (fração, `0.05` = 5%), `metrics`
+(`dict[str, float]`), `limitations` (tupla de strings, não-vazia —
+critério de aceite "limitações documentadas" verificado como
+invariante do schema, não só como uma seção escrita à mão uma vez).
+`minimum_acceptable(metric)` devolve `baseline * (1 -
+max_regression_pct)`; `check_regression(current_metrics, *,
+baseline)` compara um `dict` de métricas correntes contra a baseline e
+devolve um `RegressionCheck(passed, violations)` — ignora silenciosamente
+qualquer métrica presente só de um dos lados (permite comparar contra
+um relatório parcial, por exemplo só de retrieval ou só de geração,
+sem falhar por métricas que aquele relatório nunca teve).
+
+**"limitações documentadas"** (critério de aceite) tem duas camadas:
+o schema `Baseline.limitations` (estrutural, sempre não-vazio) e o
+conteúdo real de `config/evaluation/poc.v1.yaml`, que documenta a
+limitação mais importante desta atividade — `measured: false`: os
+valores gravados são as METAS da seção 21 do plano, não uma medição
+real (escrever esta atividade não teve acesso a um gateway LiteLLM
+alcançável, mesma limitação já documentada nos dois scripts de
+avaliação, seção 15 do plano). A primeira execução real de
+`scripts/run_retrieval_evaluation.py`/`run_generation_evaluation.py`
+contra um ambiente com gateway ativo deve avaliar se as metas foram
+atingidas e, em caso positivo, publicar `poc.v2.yaml` com os
+valores medidos e `measured: true` — `poc.v1.yaml` nunca deve ser
+editado depois de publicado. `answer_relevancy` não tem meta própria
+na seção 21 do plano — reusa a meta de faithfulness (0,85), mesma
+decisão já tomada em `run_generation_evaluation.py`.
+
+**`scripts/check_evaluation_baseline.py`** — CLI que lê um ou mais
+relatórios JSON já gravados em disco pelos dois scripts de avaliação
+(`--report`, repetível) como `dict` genérico via `json.load` (nunca um
+import Python das branches de RAG-061/062), combina as chaves
+numéricas de nível superior de todos eles e chama `check_regression`
+contra `get_current_baseline()`. Ao contrário de
+`run_retrieval_evaluation.py`/`run_generation_evaluation.py`, este
+script não chama nenhum modelo real — só lê JSON e compara números —
+por isso É testado diretamente em `tests/unit/
+test_check_evaluation_baseline.py` (mesmo padrão de
+`scripts/check_security_exceptions.py`, RAG-071).
+
+Testes: `test_baseline.py` (schema, carregamento, cache, mismatch
+id/versão vs. nome do arquivo, `minimum_acceptable`, e uma bateria de
+`check_regression` cobrindo aprovação exata, melhora, regressão dentro
+do limite, regressão além do limite, fronteira exata do limite,
+múltiplas violações, métrica ausente de um lado ou de outro, valor de
+baseline zero sem divisão por zero, e o texto da mensagem de
+violação — 100% de cobertura); `test_check_evaluation_baseline.py`
+(extração de métricas de um ou mais relatórios, filtragem de
+booleanos, código de saída 0/1 — 100% de cobertura).

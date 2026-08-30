@@ -1,0 +1,28 @@
+# Baseline versionada da POC (RAG-063, seção 21 do plano).
+#
+# measured: false — estes são os valores-ALVO da seção 21 do plano,
+# não uma medição real (nenhum gateway LiteLLM foi acessado ao
+# escrever esta atividade). Ver a docstring de
+# packages/evaluation/baseline.py para o racional completo. A primeira
+# execução real de scripts/run_retrieval_evaluation.py e
+# scripts/run_generation_evaluation.py contra um ambiente com gateway
+# ativo deve avaliar essas metas e, se atingidas, publicar
+# poc.v2.yaml com os valores medidos e measured: true — este
+# arquivo nunca deve ser editado depois de publicado.
+id: poc
+version: v1
+measured: false
+max_regression_pct: 0.05
+metrics:
+  recall_at_k: 0.80
+  mrr: 0.70
+  faithfulness: 0.85
+  # Sem meta própria na seção 21 do plano — reusa a meta de
+  # faithfulness, mesma decisão de scripts/run_generation_evaluation.py.
+  answer_relevancy: 0.85
+limitations:
+  - "Valores-alvo da seção 21 do plano, não medidos de fato (measured: false) — nenhum gateway LiteLLM foi acessado ao criar esta baseline."
+  - "recall_at_k e mrr referem-se a RAG-061 (retrieval), medidos com top_k=5 sobre o corpus de referência README.md indexado em memória (scripts/run_retrieval_evaluation.py) — não um corpus de produção."
+  - "faithfulness e answer_relevancy referem-se a RAG-062 (geração), julgados por um modelo LLM juiz (adapters/litellm/generation_evaluator.py) — sujeitos à variância e ao viés desse julgamento automatizado, não a uma revisão humana."
+  - "answer_relevancy reusa a meta de faithfulness (0,85): o plano não fixa um valor próprio para essa dimensão na seção 21."
+  - "Nenhuma execução real de ponta a ponta (RAG-073, quality gate de RAG no CI, ainda não implementado) validou estes números contra o pipeline completo de produção."
