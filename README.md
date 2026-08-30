@@ -238,7 +238,7 @@ paralelo a `pull-request.yml`, com cinco jobs:
 | Secret scanning | [gitleaks](https://github.com/gitleaks/gitleaks) | histórico completo do git em busca de segredos | qualquer segredo encontrado |
 | SAST | [bandit](https://bandit.readthedocs.io/) (`make security`) | código próprio (`apps`, `packages`, `adapters`) | achado de severidade **HIGH** (LOW/MEDIUM ficam visíveis no log, sem bloquear) |
 | SCA | [pip-audit](https://github.com/pypa/pip-audit) (`make security`) | dependências instaladas contra bases de advisories conhecidas | qualquer vulnerabilidade conhecida |
-| Lint de Dockerfile | [hadolint](https://github.com/hadolint/hadolint) | todo `Dockerfile*` do repositório | regra de nível **error** (ainda não há Dockerfile — este job passa trivialmente até o RAG-072 introduzir um) |
+| Lint de Dockerfile | [hadolint](https://github.com/hadolint/hadolint) | todo `Dockerfile*` do repositório (`Dockerfile.api`/`Dockerfile.worker`, RAG-072) | regra de nível **error** |
 | Exceções de segurança | `scripts/check_security_exceptions.py` (`make security`) | `security/exceptions.yml` | entrada sem justificativa/prazo, ou prazo vencido |
 
 Decisões e limitações:
@@ -261,11 +261,10 @@ Decisões e limitações:
   pacotes Python), por isso não entram em `make security` — rode-os
   manualmente se quiser reproduzir localmente (versões pinadas em
   `.github/workflows/security.yml`).
-- **Lint de Dockerfile ainda não tem o que escanear.** Não existe
-  `Dockerfile` neste repositório até o momento (chega no RAG-072); o
-  job localiza `Dockerfile*` dinamicamente e passa sem erro quando não
-  encontra nenhum, para já estar pronto quando o RAG-072 adicionar os
-  arquivos.
+- **Lint de Dockerfile escaneia `Dockerfile.api`/`Dockerfile.worker`**
+  (RAG-072). O job continua localizando `Dockerfile*` dinamicamente em
+  vez de nomear os arquivos — passa sem erro se um dia nenhum existir,
+  sem exigir mudança no workflow quando um novo Dockerfile aparecer.
 
 ## Domínio (RAG-010)
 
@@ -1243,6 +1242,79 @@ exceção ainda é relançada, para o `autoretry_for` do Celery continuar
 funcionando). `test_knowledge_base_router.py`/`test_document_router.py`
 cobrem que cada endpoint chama a métrica certa.
 
+## Publicação de imagens no GHCR (RAG-072)
+
+`.github/workflows/publish.yml` constrói e publica as imagens da API e
+do worker em `ghcr.io` a cada push em `master` — na prática, a cada PR
+mergeada (nunca em PR: publicar uma imagem de um branch de feature não
+teria consumidor). Convive com `pull-request.yml`/`security.yml`
+(RAG-070/071), que continuam sendo o gate de qualidade/segurança antes
+do merge.
+
+**`Dockerfile.api`/`Dockerfile.worker`** (multi-stage): o estágio
+`builder` instala só as dependências de produção declaradas em
+`pyproject.toml` (nunca os extras de dev — ruff/mypy/pytest/bandit/
+pip-audit não têm por que existir na imagem publicada), usando pacotes
+Python vazios como placeholder só para o `pip install .` resolver os
+metadados do projeto sem precisar do código-fonte real ainda — isso
+mantém a camada de instalação de dependências cacheável independente
+de mudança de código. O estágio final copia o resultado desse install
+mais `apps/`, `packages/`, `adapters/` e `config/` de verdade, roda
+como usuário não-root, e usa `python -m uvicorn`/`python -m celery`
+(em vez do executável direto) para garantir que o diretório de
+trabalho (`/app`, onde `apps/`/`packages/`/`adapters/`/`config/` foram
+copiados) entre no `sys.path` — sem isso, `apps.api.main` não seria
+importável. **`config/` precisa ficar como irmão de `packages/` no
+filesystem da imagem, nunca instalado via pip**: `packages/config/
+models.py`/`packages/generation/prompts.py` resolvem o caminho via
+`Path(__file__).parent.parent.parent / "config"`, relativo à raiz do
+projeto, não a um pacote instalado (mesma razão por que `make install`
+usa `pip install -e` em vez de um install normal).
+
+**Critérios de aceite:**
+
+- **"tag por SHA"**: cada imagem é publicada como `ghcr.io/<owner>/
+  rag-platform-{api,worker}:sha-<sha completo do commit>` — imutável e
+  rastreável a um commit exato. `:latest` também é publicada, como
+  conveniência para quem só quer "a mais recente"; RAG-074/075 (deploy)
+  devem sempre referenciar a tag `sha-<sha>` (ou o digest), nunca
+  `:latest`, que é uma tag móvel.
+- **"digest registrado"**: o digest (`sha256:...`) de cada imagem
+  publicada é escrito no resumo da run do workflow
+  (`GITHUB_STEP_SUMMARY`) — visível a partir da própria run, sem
+  precisar reconstruir a imagem para descobrir qual digest foi
+  publicado.
+- **"SBOM gerada"**: `docker/build-push-action` (`sbom: true`) gera um
+  SBOM (SPDX, via BuildKit) e o anexa à imagem publicada como
+  attestation OCI — nenhuma ferramenta além do próprio buildx.
+  `provenance: true` também é gerado (registro verificável de como/onde
+  a imagem foi construída) — não é um critério de aceite explícito,
+  mas é o mesmo mecanismo do buildx, sem custo adicional.
+- **"nenhuma credencial permanente necessária"**: autenticação no GHCR
+  usa o `GITHUB_TOKEN` efêmero da própria Actions run (`permissions:
+  packages: write`, expira ao fim do job) — nenhum PAT nem segredo de
+  longa duração é criado ou armazenado no repositório.
+
+**Smoke check antes de publicar**: como não há Docker disponível no
+ambiente onde esta atividade foi desenvolvida (nenhuma forma de
+validar o build localmente antes do PR), o workflow constrói cada
+imagem localmente na runner primeiro (`load: true`, sem publicar) e
+roda um `python -c "import ..."` do módulo de entrada de cada uma
+(`apps.api.main`/`apps.indexing_worker.worker`) dentro do container —
+pega um Dockerfile quebrado (dependência faltando, caminho de `config/`
+errado) antes de chegar ao registro. O cache do buildx (`type=gha`) faz
+o build de publicação reaproveitar as camadas do build de teste, em
+vez de reconstruir do zero.
+
+**Validado localmente nesta atividade** (sem Docker disponível, mas
+com as mesmas ferramentas que os jobs de CI usam): `hadolint --config
+.hadolint.yaml --failure-threshold error` em ambos os Dockerfiles
+(limpo — só um aviso `DL3008`, nível `warning`, não bloqueia) e
+`actionlint` no workflow novo (limpo). A validação de que os builds
+de fato funcionam (o smoke check acima) só acontece na primeira run
+real do workflow, após o merge — mesma limitação já documentada para
+os demais adapters/infra deste projeto que dependem de um ambiente
+real (Postgres, Collector) que este sandbox não tem.
 ## Reranker (RAG-033)
 
 Reordena os candidatos que já saíram da fusão RRF (RAG-032) por
