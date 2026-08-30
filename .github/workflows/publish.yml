@@ -1,0 +1,129 @@
+# RAG-072 — Publicar imagens da API e do worker no GHCR.
+#
+# Roda só em push para `master` (nunca em PR — PRs já passam por
+# `pull-request.yml`/`security.yml`, RAG-070/071; publicar uma imagem
+# de um branch de feature não teria consumidor). Cada push em `master`
+# é, na prática, um merge de PR já aprovado e validado.
+#
+# Critérios de aceite (backlog):
+#   - "tag por SHA": cada imagem é publicada como
+#     `ghcr.io/<owner>/rag-platform-{api,worker}:sha-<commit sha completo>`
+#     — imutável e rastreável a um commit exato. `:latest` também é
+#     publicada, como conveniência para quem só quer "o mais recente",
+#     nunca como a tag que RAG-074/075 (deploy) devem referenciar.
+#   - "digest registrado": o digest (`sha256:...`) de cada imagem
+#     publicada é escrito no resumo do job (`GITHUB_STEP_SUMMARY`) —
+#     rastreável a partir da run do workflow, sem precisar reconstruir
+#     a imagem para descobrir o digest.
+#   - "SBOM gerada": `docker/build-push-action` gera e anexa um SBOM
+#     (formato SPDX, via BuildKit) à imagem publicada como um
+#     attestation OCI — nenhuma ferramenta externa além do próprio
+#     buildx.
+#   - "nenhuma credencial permanente necessária": autenticação no GHCR
+#     usa o `GITHUB_TOKEN` efêmero da própria Actions run (escopo
+#     `packages: write`, expira ao fim do job) — nenhum PAT/segredo de
+#     longa duração é criado ou armazenado.
+#
+# Antes de publicar, cada imagem é construída localmente na runner
+# (sem push) e testada com um import smoke-check (`python -c "import
+# ..."`) do módulo de entrada — pega um Dockerfile quebrado (dependência
+# faltando, caminho errado) antes de chegar ao registro, já que não há
+# como testar o build localmente antes deste PR (sem Docker no ambiente
+# de desenvolvimento). O cache do buildx (`type=gha`) faz o build de
+# publicação reaproveitar as camadas do build de teste, em vez de
+# reconstruir do zero.
+name: Publish
+
+on:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-and-push:
+    name: Build e publicar (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: api
+            dockerfile: Dockerfile.api
+            import_check: "import apps.api.main"
+          - image: worker
+            dockerfile: Dockerfile.worker
+            import_check: "import apps.indexing_worker.worker"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Configurar Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login no GHCR (GITHUB_TOKEN efêmero, sem credencial permanente)
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Metadados da imagem (tags, labels OCI)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/rag-platform-${{ matrix.image }}
+          tags: |
+            type=raw,value=sha-${{ github.sha }}
+            type=raw,value=latest
+
+      - name: Build local para o smoke check (sem publicar)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          load: true
+          push: false
+          tags: rag-platform-${{ matrix.image }}:smoke-check
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+      - name: Smoke check (importa o módulo de entrada)
+        run: |
+          docker run --rm rag-platform-${{ matrix.image }}:smoke-check \
+            python -c "${{ matrix.import_check }}"
+
+      - name: Build e publicar no GHCR
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          sbom: true
+          provenance: true
+
+      - name: Registrar digest no resumo do workflow
+        run: |
+          {
+            echo "### Imagem publicada: \`${{ matrix.image }}\`"
+            echo ""
+            echo "**Digest:** \`${{ steps.push.outputs.digest }}\`"
+            echo ""
+            echo "**Tags:**"
+            echo "${{ steps.meta.outputs.tags }}" | sed 's/^/- `/; s/$/`/'
+          } >> "$GITHUB_STEP_SUMMARY"

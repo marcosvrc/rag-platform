@@ -16,8 +16,8 @@
 #                como bloqueante por padrão).
 #   - hadolint:  só falha em regras de nível "error"
 #                (--failure-threshold error); regras de nível "warning"
-#                ficam visíveis, sem bloquear. Roda apenas se existir
-#                Dockerfile no repositório (nenhum ainda — chega em
+#                ficam visíveis, sem bloquear. Roda contra todo
+#                `Dockerfile*` do repositório (Dockerfile.api/.worker,
 #                RAG-072).
 #
 # Exceções documentadas (justificativa + prazo) vivem em
@@ -121,7 +121,7 @@ jobs:
           files=$(find . -type f \( -iname "Dockerfile" -o -iname "Dockerfile.*" -o -iname "*.Dockerfile" \) \
             -not -path "./.git/*" | sort)
           if [ -z "$files" ]; then
-            echo "Nenhum Dockerfile encontrado ainda (chega em RAG-072) — nada para escanear."
+            echo "Nenhum Dockerfile encontrado — nada para escanear."
             echo "found=false" >> "$GITHUB_OUTPUT"
           else
             echo "found=true" >> "$GITHUB_OUTPUT"

@@ -1,0 +1,63 @@
+# rag-platform — imagem da API (RAG-072).
+#
+# Build multi-stage: o estágio `builder` instala as dependências de
+# produção (sem os extras de dev — ruff/mypy/pytest/bandit/pip-audit
+# não têm por que existir na imagem publicada) num diretório isolado
+# via `pip install --user`; o estágio final copia só esse resultado e
+# o código da aplicação, nunca as ferramentas de build. Isso mantém a
+# imagem final pequena e sem toolchain de compilação.
+#
+# Publicada em ghcr.io pelo workflow `.github/workflows/publish.yml`
+# (só após merge em `master`, nunca em PR) — tag por SHA do commit,
+# nenhuma credencial permanente (usa o GITHUB_TOKEN efêmero da Actions
+# run).
+FROM python:3.12-slim AS builder
+
+# build-essential só existe neste estágio: cobre qualquer dependência
+# transitiva sem wheel pré-compilado para esta plataforma: descartado
+# junto com o resto do estágio `builder` na imagem final.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Só pyproject.toml (sem os pacotes de app ainda) para o cache de
+# camadas do Docker não invalidar a instalação de dependências a cada
+# mudança de código-fonte — só quando pyproject.toml mudar.
+COPY pyproject.toml ./
+# `pip install .` (não `-e`) precisa que os pacotes já existam para
+# resolver os metadados do projeto; um placeholder mínimo evita copiar
+# o código de verdade só para este passo (feito de novo, por completo,
+# no estágio final).
+RUN mkdir -p apps packages adapters \
+    && touch apps/__init__.py packages/__init__.py adapters/__init__.py
+
+RUN pip install --user --no-cache-dir .
+
+FROM python:3.12-slim AS runtime
+
+# Usuário não-root (critério comum de segurança de imagem, reforçado
+# pelo hadolint via RAG-071): nada no processo da API roda como root.
+RUN useradd --create-home --uid 1000 --shell /usr/sbin/nologin appuser
+
+WORKDIR /app
+
+COPY --from=builder --chown=appuser:appuser /root/.local /home/appuser/.local
+COPY --chown=appuser:appuser apps ./apps
+COPY --chown=appuser:appuser packages ./packages
+COPY --chown=appuser:appuser adapters ./adapters
+COPY --chown=appuser:appuser config ./config
+
+ENV PATH=/home/appuser/.local/bin:$PATH \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+USER appuser
+
+EXPOSE 8000
+
+# Sem valores default de configuração sensível aqui (Settings, RAG-004,
+# exige as variáveis obrigatórias no ambiente do container em runtime —
+# a imagem não embute nenhum segredo).
+CMD ["python", "-m", "uvicorn", "apps.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

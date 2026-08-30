@@ -1,0 +1,27 @@
+# rag-platform — exclui do contexto de build (RAG-072) tudo que não é
+# necessário para rodar a API/worker: reduz o tamanho do contexto
+# enviado ao daemon e evita copiar segredos/artefatos de dev para
+# dentro da imagem por engano.
+.git
+.github
+.venv
+venv*
+**/__pycache__
+**/*.py[codz]
+*.egg-info
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.coverage
+coverage.xml
+htmlcov
+.env
+tests
+docs
+deploy
+security
+rag-platform-llm-implementation-plan.md
+README.md
+*.md
+Makefile
+docker-compose.yml
