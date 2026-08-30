@@ -1337,8 +1337,8 @@ ordem, truncados a `top_n`) implementam a mesma porta — quem chama
 nunca sabe qual dos dois está por trás. A escolha é
 `Settings.reranker_enabled` (`RERANKER_ENABLED`, padrão `false`) — cabe
 a quem monta o endpoint `retrieve` (RAG-034) escolher o adapter a
-partir dela; esta atividade só entrega a porta, os dois adapters e a
-configuração, não o ponto de injeção (que ainda não existe).
+partir dela; esta atividade entrega a porta e os dois adapters — o ponto de
+injeção é `apps/api/routers/retrieval.py::get_reranker` (RAG-034).
 
 **`LiteLLMReranker`** fala com o mesmo gateway LiteLLM de RAG-025/030
 (`POST {base_url}/rerank`), no formato Cohere Rerank v2 que o LiteLLM
@@ -1357,8 +1357,7 @@ fica atrás dele é decisão de configuração do gateway LiteLLM
 (`config/litellm/config.yaml`), não deste arquivo. Este ticket não
 escolhe nem provisiona esse modelo real — a atividade não pede essa
 decisão (ao contrário de RAG-030, cujo critério de aceite exigia
-decidir o modelo de embeddings) — fica para quando o endpoint
-`retrieve` (RAG-034) de fato ligar `RERANKER_ENABLED=true`.
+decidir o modelo de embeddings).
 
 **"timeout usa ranking anterior"** (critério de aceite):
 `rerank_safely()` (mesmo padrão de `record_audit_event_safely`,
@@ -1390,3 +1389,73 @@ resposta malformada, header `Authorization` quando `LITELLM_API_KEY`
 configurado, e a métrica de latência (chamada só quando há
 candidatos). `tests/unit/test_model_config.py` cobre o alias
 `reranker.v1.yaml`.
+
+## Endpoint retrieve (RAG-034)
+
+Primeiro endpoint HTTP da fase de geração (E4 do plano): expõe busca
+vetorial + busca lexical + fusão RRF (RAG-032) + reranking
+configurável (RAG-033) como uma única chamada síncrona, `POST
+/v1/knowledge-bases/{id}/retrieve`. Sem geração de resposta (isso é
+RAG-042/043) e sem persistir `QueryLog`/`QueryEvidence` (RAG-010) —
+essa persistência exige um `query_id` que só existe quando uma query
+de verdade é registrada, o que fica para RAG-044. Este ticket entrega
+só a recuperação, para poder validar a qualidade do retrieval
+isoladamente (inclusive pelo dataset dourado de RAG-060) antes de
+acoplar geração.
+
+**Fluxo** (`packages/application/queries/retrieval.py::retrieve_evidence`):
+busca a base de conhecimento pelo par `(tenant_id, knowledge_base_id)`
+— 404 (nunca 403) se não existir ou for de outro tenant, mesmo padrão
+de `documents.py`/`knowledge_bases.py` (RAG-012/RAG-051) — embeda a
+query (`EmbeddingProviderPort`), dispara busca vetorial e lexical em
+paralelo (`asyncio.gather`, cada uma trazendo um pool de até
+`CANDIDATE_POOL_SIZE=100` candidatos), funde os dois rankings via
+`reciprocal_rank_fusion` (RAG-032) e só então aplica reranking
+(`rerank_safely`, RAG-033) sobre o resultado fundido, truncando a
+`top_k`.
+
+**Filtros (`page`/`section`) aplicados pós-fusão, em Python** —
+decisão de escopo deliberada: em vez de empurrar o filtro para dentro
+do SQL de `VectorSearchPort`/`LexicalSearchPort` (o que exigiria
+alterar contratos de porta já mesclados em RAG-030/031), o filtro é
+aplicado sobre os candidatos já buscados, antes do reranking. Isso é
+suficiente para o volume atual e mantém as portas estáveis; se no
+futuro um filtro muito seletivo em uma base grande esvaziar demais o
+pool de 100 candidatos, vale revisitar e mover o filtro para a
+consulta SQL — não é um problema deste ticket.
+
+**Contrato bloqueia filtro arbitrário** (critério de aceite):
+`RetrievalFiltersRequest` (`packages/contracts/retrieval.py`) usa
+`extra="forbid"` (mesmo padrão de `KnowledgeBaseCreateRequest`) — só
+`page`/`section` são aceitos; qualquer outra chave (ex.: `{"author":
+...}`) gera 422 automaticamente via validação do Pydantic, sem
+precisar de nenhuma lista de bloqueio própria. `top_k` é limitado por
+`Field(ge=1, le=MAX_TOP_K)` no contrato E reclampado de novo dentro do
+caso de uso (`bounded_top_k = max(1, min(top_k, MAX_TOP_K))`) — mesma
+defesa em profundidade de `list_knowledge_bases`, já que
+`packages/application` nunca importa `packages/contracts`.
+
+**`rerank_score` é `None` quando o reranker está desativado**
+(`RERANKER_ENABLED=false`): o score de fusão RRF nunca é reaproveitado
+como se fosse um score de reranking de verdade — são métricas
+diferentes, e expor isso errado no contrato enganaria quem consome a
+API.
+
+Testes: `tests/unit/test_retrieval_query.py` cobre o caso de uso
+(fusão RRF entre vetorial+lexical, deduplicação de um chunk presente
+nos dois rankings, filtro por `page`, filtro por `section`, respeita
+`top_k`, reclampa `top_k` acima do máximo, posições 0-indexadas e
+sequenciais, `rerank_score` ausente quando desativado, score/ordem
+refletindo o reranker quando ativado, base inexistente ou de outro
+tenant). `tests/unit/test_retrieval_router.py` cobre a visão HTTP
+(200 com evidências/metadados/scores completos, 401 sem
+`Authorization`, 404 para base inexistente ou de outro tenant, 422
+para query vazia, 422 para `top_k` acima do máximo, 200 com filtro
+`page` permitido, 422 com filtro arbitrário, seleção de
+`PassthroughReranker`/`LiteLLMReranker` conforme
+`Settings.reranker_enabled`) — mesmo padrão de app real +
+`dependency_overrides` de `test_knowledge_base_router.py`, incluindo a
+sobrescrita de `get_audit_log` (o endpoint `POST /v1/knowledge-bases`,
+usado para criar a base de conhecimento de cada teste, registra
+auditoria por baixo dos panos — esquecer essa sobrescrita faz o teste
+tocar o `get_session`/`get_settings()` reais).
