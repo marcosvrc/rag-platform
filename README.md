@@ -1459,3 +1459,71 @@ sobrescrita de `get_audit_log` (o endpoint `POST /v1/knowledge-bases`,
 usado para criar a base de conhecimento de cada teste, registra
 auditoria por baixo dos panos — esquecer essa sobrescrita faz o teste
 tocar o `get_session`/`get_settings()` reais).
+
+## Dataset dourado de avaliação (RAG-060)
+
+Schema versionado de perguntas, respostas esperadas e evidências
+esperadas — a referência fixa contra a qual RAG-061 (Recall@K, MRR) e
+RAG-062 (faithfulness, answer relevancy) vão medir a qualidade do RAG.
+Sem essa referência, "melhorou" ou "piorou" não tem como ser medido;
+`EvaluationRun.dataset_version` (seção 9 do plano) associa toda
+execução de avaliação à versão exata do dataset contra a qual ela
+rodou.
+
+**Mesma convenção de versionamento imutável do prompt de resposta**
+(RAG-040): `datasets/golden/<id>.<version>.yaml`, carregado por
+`packages/evaluation/golden_dataset.py::load_golden_dataset(id,
+version)` — uma versão publicada nunca é editada, uma mudança de
+conteúdo sempre cria uma versão nova. `get_default_golden_dataset()` é
+o único lugar que decide qual versão a avaliação usa hoje (`golden`,
+`v1`).
+
+**Por que `expected_evidence` não referencia `chunk_id`**: um
+`chunk_id` é um UUID gerado no momento da indexação — reindexar os
+mesmos documentos, ou rodar em outro ambiente, gera UUIDs diferentes,
+então não serviria como identificador estável num dataset versionado
+no repositório. Em vez disso, cada evidência esperada aponta para um
+`document_id` (um identificador estável escolhido por quem cura o
+dataset, nunca um ID de banco) e um `content_contains` — um trecho de
+texto que RAG-061 vai usar para casar um chunk recuperado de verdade
+com a expectativa do caso, por conteúdo.
+
+**Invariantes do schema, não só convenção de quem escreve o caso**
+(`GoldenCase`/`GoldenDataset`, `pydantic.model_validator`): uma
+pergunta sem resposta (`expected_answer=None` — critério de aceite
+"inclui perguntas sem resposta") não pode ter `expected_evidence` (não
+faria sentido ter evidência para uma pergunta que não tem resposta);
+uma pergunta com resposta esperada precisa de ao menos uma evidência;
+o dataset inteiro precisa ter pelo menos `MINIMUM_CASE_COUNT` (30)
+casos (critério de aceite, também item da Definition of Done da POC,
+seção 20 do plano) e pelo menos uma pergunta sem resposta; IDs de caso
+não podem se repetir. Um dataset que viole qualquer uma dessas regras
+falha ao carregar, antes de qualquer avaliação rodar contra ele.
+
+**Corpus de referência do `golden.v1.yaml`: o próprio README.md deste
+repositório** — 40 casos (35 respondíveis + 5 sem resposta, acima do
+mínimo de 30), cada um apontando para uma seção real deste arquivo.
+Decisão deliberada desta atividade: um corpus real, estável e já
+versionado no repositório, sem depender de nenhuma infraestrutura viva
+(Postgres, embeddings) só para o dataset existir — ingerir um corpus
+de documentos de verdade numa base de conhecimento indexada é
+trabalho de integração, não de definição de schema, e fica para
+RAG-061, quando a avaliação de retrieval de fato rodar contra uma base
+indexada (o próprio README.md é um candidato natural de corpus para
+isso, já que este dataset já referencia suas seções). Os 5 casos sem
+resposta perguntam sobre algo deliberadamente fora do que o README
+documenta (SLA contratual, custo, aplicativo mobile, um valor de
+faithfulness medido em produção — não a meta da POC, um DPO) — para
+exercitar o comportamento "não há evidência suficiente" (RAG-040/043),
+nunca uma resposta inventada.
+
+Testes: `tests/unit/test_golden_dataset.py` cobre o carregamento real
+de `golden.v1` (id/versão corretos, mínimo de casos, pelo menos uma
+pergunta sem resposta, IDs únicos, toda pergunta respondível tem
+evidência), erro (`GoldenDatasetNotFoundError`) para id/versão
+inexistente, erro de inconsistência id/versão-vs-nome-de-arquivo,
+cache por `(id, version)` e imutabilidade — e, construindo
+`GoldenCase`/`GoldenDataset` diretamente, cada invariante em isolado
+(pergunta sem resposta com evidência, pergunta respondível sem
+evidência, poucos casos, sem nenhuma pergunta sem resposta, IDs
+duplicados, campo desconhecido rejeitado por `extra="forbid"`).
