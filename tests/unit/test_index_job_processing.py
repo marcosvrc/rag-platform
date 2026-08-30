@@ -15,6 +15,7 @@ import pytest
 from adapters.document_processor.in_memory import FakeDocumentProcessor
 from adapters.document_repository.in_memory import InMemoryDocumentRepository
 from packages.application.commands.index_job import (
+    IndexJobAttemptOutcome,
     RetryableIndexJobError,
     process_index_job_attempt,
 )
@@ -48,7 +49,7 @@ async def test_first_attempt_claims_the_job_and_succeeds(
     index_job_id = await _create_index_job(document_repository)
     processor = FakeDocumentProcessor()
 
-    await process_index_job_attempt(
+    outcome = await process_index_job_attempt(
         document_repository,
         processor,
         index_job_id=index_job_id,
@@ -59,6 +60,7 @@ async def test_first_attempt_claims_the_job_and_succeeds(
     job = document_repository._jobs[index_job_id]
     assert job.status == ProcessingStatus.SUCCEEDED
     assert processor.processed_index_job_ids == [index_job_id]
+    assert outcome == IndexJobAttemptOutcome.SUCCEEDED
 
 
 async def test_first_attempt_skips_processing_when_job_already_claimed(
@@ -69,7 +71,7 @@ async def test_first_attempt_skips_processing_when_job_already_claimed(
     await document_repository.claim_index_job(index_job_id=index_job_id)
     processor = FakeDocumentProcessor()
 
-    await process_index_job_attempt(
+    outcome = await process_index_job_attempt(
         document_repository,
         processor,
         index_job_id=index_job_id,
@@ -78,6 +80,7 @@ async def test_first_attempt_skips_processing_when_job_already_claimed(
     )
 
     assert processor.processed_index_job_ids == []
+    assert outcome is None
 
 
 async def test_failure_with_attempts_remaining_raises_retryable_error(
@@ -139,7 +142,7 @@ async def test_failure_on_the_last_attempt_is_final_and_does_not_raise(
     processor = FakeDocumentProcessor(fail_times=999)  # sempre falha
 
     # Não levanta: a última tentativa registra falha definitiva e retorna.
-    await process_index_job_attempt(
+    outcome = await process_index_job_attempt(
         document_repository,
         processor,
         index_job_id=index_job_id,
@@ -151,6 +154,7 @@ async def test_failure_on_the_last_attempt_is_final_and_does_not_raise(
     assert job.status == ProcessingStatus.FAILED
     assert job.attempts == 5
     assert job.error_code == "RuntimeError"
+    assert outcome == IndexJobAttemptOutcome.FAILED_FINAL
 
 
 async def test_error_message_is_truncated_defensively(

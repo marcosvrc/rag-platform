@@ -1,0 +1,17 @@
+# Provisionamento automático de dashboards no Grafana (RAG-053).
+# Carrega qualquer .json de deploy/observability/grafana/dashboards/
+# (montado no container em /var/lib/grafana/dashboards — ver
+# docker-compose.yml) — adicionar um dashboard novo é só criar o
+# arquivo, sem reiniciar o Grafana (updateIntervalSeconds sonda a
+# pasta).
+apiVersion: 1
+
+providers:
+  - name: rag-platform
+    orgId: 1
+    folder: ""
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

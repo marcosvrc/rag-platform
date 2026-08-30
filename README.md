@@ -1173,3 +1173,72 @@ dimensão fixa 1.024 e que o índice HNSW existe com o operador
 Ollama/LiteLLM ficam para verificação manual via `docker compose up` e
 para `tests/integration/` quando essa suíte existir — mesma limitação
 já documentada para os demais adapters Postgres deste projeto.
+
+## Métricas Prometheus (RAG-053)
+
+Destrava com métricas o mesmo que RAG-052 destravou com traces: técnica
+(HTTP, Celery) e de consumo (negócio) — via OpenTelemetry, reaproveitando
+a infraestrutura de RAG-003 (Collector expondo `:8889` em formato
+Prometheus, já scrapado pelo Prometheus do `docker-compose.yml`).
+
+`packages/observability/metrics.py` segue exatamente a mesma arquitetura
+de `tracing.py` (RAG-052) — mesmo racional de ler `OTEL_*` diretamente
+via `os.getenv`, mesmo interruptor próprio (`OTEL_METRICS_ENABLED`,
+default `false`) para não exportar nada em teste, mesma garantia de
+zero overhead quando desligado (a API do OpenTelemetry nunca falha sem
+um `MeterProvider` real — devolve um meter "no-op" atrás de um proxy que
+é atualizado sozinho se um provider real for definido depois).
+
+**Técnicas**: nenhum código novo — `FastAPIInstrumentor`/`CeleryInstrumentor`
+(já aplicados por `configure_tracing`/`instrument_fastapi_app`, RAG-052)
+emitem métricas E traces ao mesmo tempo, a partir do que estiver
+configurado globalmente no momento em que são chamados; por isso
+`configure_metrics()` roda antes de `instrument_fastapi_app(app)` em
+`apps/api/main.py` (mesma ordem que já valia para `configure_tracing`).
+
+**De consumo**: `record_document_uploaded`/`record_document_reindexed`/
+`record_knowledge_base_mutation`/`record_index_job_attempt`/
+`record_embedding_batch` — chamados a partir dos MESMOS pontos de
+entrada que já registram auditoria (RAG-054) ou processam o trabalho de
+fato (routers da API, a task Celery, o adapter LiteLLM), nunca de
+dentro de `packages/application` (domínio e casos de uso não importam
+OpenTelemetry diretamente, seção 5.1 do plano — a mesma razão pela qual
+RAG-054 registrou auditoria a partir dos routers). A única mudança em
+`packages/application`: `process_index_job_attempt` (RAG-022) agora
+devolve um `IndexJobAttemptOutcome | None` (antes devolvia sempre
+`None`) — o único jeito de a task Celery distinguir sucesso de falha
+definitiva sem inspecionar `IndexJob` de novo, já que as duas retornam
+normalmente (só a falha NÃO definitiva levanta `RetryableIndexJobError`).
+
+**Cardinalidade** (critério de aceite "labels não possuem cardinalidade
+descontrolada"): todo label vem de um conjunto fixo e pequeno —
+`mime_type` (4 valores, `_ALLOWED_EXTENSIONS_BY_MIME_TYPE`), `action`
+(create/update/delete), `status` (succeeded/failed_retryable/failed_final)
+— nunca `tenant_id`, `document_id` nem qualquer outro identificador de
+cardinalidade livre.
+
+**Dashboards básicos** (critério de aceite): `deploy/observability/grafana/
+dashboards/rag-platform-overview.json`, carregado automaticamente pelo
+provider `file` em `provisioning/dashboards/dashboards.yml` — seis
+painéis (requisições HTTP por rota, documentos enviados por tipo MIME,
+mutações de base de conhecimento por ação, tentativas de indexação por
+desfecho, duração de indexação p50/p95, chamadas ao gateway de
+embeddings). Os nomes exatos de métrica no Prometheus dependem da
+conversão que o exporter do OTel Collector faz (pontos viram
+underscores, contadores ganham sufixo `_total`, histogramas viram
+`_bucket`/`_sum`/`_count`) — confirmar contra `curl localhost:8889/metrics`
+na primeira subida real (`docker compose up`) fica para verificação
+manual, mesma limitação já documentada para os demais adapters/infra
+deste projeto que dependem de um Postgres/Collector real (nenhum teste
+de pull request sobe infraestrutura real, seção 1 do plano).
+
+Testes: `tests/unit/test_metrics.py` cobre `configure_metrics`
+(ligado/desligado, override de `OTEL_SERVICE_NAME`) e cada `record_*`
+(instrumento e labels corretos), tudo com o exportador/provider/reader
+dublados — mesmo padrão de `test_tracing.py`. `test_index_job_processing.py`
+cobre o novo valor de retorno de `process_index_job_attempt`.
+`test_indexing_worker_task.py` cobre que a task registra o desfecho
+certo (incluindo que a métrica de falha retryable é registrada e a
+exceção ainda é relançada, para o `autoretry_for` do Celery continuar
+funcionando). `test_knowledge_base_router.py`/`test_document_router.py`
+cobrem que cada endpoint chama a métrica certa.

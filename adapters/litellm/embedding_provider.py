@@ -13,15 +13,14 @@ existente do projeto) resolve.
 
 ## Provisionamento do gateway
 
-Este adapter só implementa o cliente — não provisiona um proxy LiteLLM
-rodando localmente (`docker-compose.yml` ainda não tem esse serviço).
-`Settings.litellm_base_url` aponta para onde ele deveria estar (default
-`http://localhost:4000`, a porta padrão do LiteLLM proxy). Decisão
-consciente desta atividade: subir um proxy real exigiria escolher e
-configurar credenciais de um provedor de embeddings de verdade (nenhuma
-existe ainda no `.env.example`) — uma decisão de produto melhor tomada
-explicitamente do que assumida sozinha. Ver README, seção RAG-025, para
-o que falta para rodar isso localmente de ponta a ponta.
+Este adapter só implementa o cliente — a atividade original (RAG-025)
+deliberadamente não provisionou um proxy LiteLLM real, porque isso
+exigiria escolher um modelo/provedor de embeddings de verdade, uma
+decisão de produto melhor tomada explicitamente do que assumida
+sozinha. Essa decisão foi tomada no RAG-030 (Qwen3-Embedding-0.6B via
+Ollama): `docker-compose.yml` já sobe o proxy real (serviço `litellm`)
+e `Settings.litellm_base_url` (default `http://localhost:4000`) aponta
+para ele. Ver README, seções RAG-025 e RAG-030, para os detalhes.
 
 ## Retry e timeout
 
@@ -35,11 +34,18 @@ gateway (HTTP >= 500, erro de conexão, corpo malformado). Um HTTP 4xx
 como transitório: levanta `EmbeddingProviderUnavailableError` na
 primeira tentativa, sem consumir retries (retry não corrige uma
 requisição malformada).
+
+Desde o RAG-053, `embed()` também registra uma métrica de consumo
+(`packages.observability.metrics.record_embedding_batch`) com a
+contagem total de textos e a duração de toda a chamada (todos os
+lotes HTTP juntos, não lote a lote) — só quando `texts` não é vazio,
+já que uma lista vazia nem chega a chamar o gateway.
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 import httpx
@@ -52,6 +58,7 @@ from packages.application.ports.embedding_provider import (
 )
 from packages.config.models import get_default_embedding_model
 from packages.config.settings import Settings
+from packages.observability.metrics import record_embedding_batch
 
 _EMBEDDINGS_PATH = "/embeddings"
 _RETRY_BACKOFF_BASE_SECONDS = 0.5
@@ -75,6 +82,7 @@ class LiteLLMEmbeddingProvider(EmbeddingProviderPort):
         if not texts:
             return []
 
+        started_at = time.monotonic()
         batch_size = self._settings.litellm_embedding_batch_size
         headers = {}
         if self._settings.litellm_api_key is not None:
@@ -90,6 +98,10 @@ class LiteLLMEmbeddingProvider(EmbeddingProviderPort):
             for start in range(0, len(texts), batch_size):
                 batch = texts[start : start + batch_size]
                 embeddings.extend(await self._embed_batch(client, batch))
+
+        record_embedding_batch(
+            text_count=len(texts), duration_seconds=time.monotonic() - started_at
+        )
         return embeddings
 
     async def _embed_batch(self, client: httpx.AsyncClient, batch: list[str]) -> list[list[float]]:
