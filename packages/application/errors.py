@@ -60,3 +60,13 @@ class UnprocessableEntityError(ApplicationError):
     violam uma regra de negócio (422)."""
 
     title = "Entidade não processável"
+
+
+class ServiceUnavailableError(ApplicationError):
+    """Uma dependência externa (RAG-044: o gateway de geração LiteLLM)
+    falhou depois de esgotar suas próprias tentativas de retry — uma
+    indisponibilidade real de infraestrutura, nunca "o modelo respondeu
+    algo sem evidência suficiente" (isso tem sua própria resposta segura,
+    RAG-043, sem levantar exceção) (503)."""
+
+    title = "Serviço indisponível"

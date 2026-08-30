@@ -9,6 +9,7 @@ vida do `IndexJob`) sem precisar de um banco real — mesmo padrão de
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -132,6 +133,23 @@ class InMemoryDocumentRepository(DocumentRepositoryPort):
 
     async def get_document(self, *, document_id: UUID) -> Document | None:
         return self._documents.get(document_id)
+
+    async def get_documents_by_chunk_ids(
+        self, *, chunk_ids: Sequence[UUID]
+    ) -> dict[UUID, Document]:
+        result: dict[UUID, Document] = {}
+        for chunk_id in chunk_ids:
+            chunk = self._chunks.get(chunk_id)
+            if chunk is None:
+                continue
+            version = self._versions.get(chunk.version_id)
+            if version is None:
+                continue
+            document = self._documents.get(version.document_id)
+            if document is None:
+                continue
+            result[chunk_id] = document
+        return result
 
     async def get_latest_version(self, *, document_id: UUID) -> DocumentVersion | None:
         versions = [v for v in self._versions.values() if v.document_id == document_id]

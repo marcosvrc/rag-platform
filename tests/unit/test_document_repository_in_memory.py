@@ -514,3 +514,110 @@ class TestRag027CreateReindexJob:
             await repository.create_reindex_job(
                 document_id=upload.document.id, object_key=upload.version.object_key, version=1
             )
+
+
+class TestRag044GetDocumentsByChunkIds:
+    """RAG-044: resolve `Document` a partir de `chunk_id` (via
+    `Chunk.version_id` -> `DocumentVersion.document_id`), para montar
+    `document_id`/`document_name` nas citações da resposta de
+    `/v1/query`."""
+
+    async def test_resolves_the_document_for_a_chunk_of_an_indexed_version(
+        self, repository: InMemoryDocumentRepository
+    ) -> None:
+        upload = await repository.create_document(
+            tenant_id=TENANT_ID,
+            knowledge_base_id=KNOWLEDGE_BASE_ID,
+            name="guia.pdf",
+            mime_type="application/pdf",
+            checksum="20" * 32,
+            object_key="kb/checksum/guia.pdf",
+            idempotency_key=None,
+        )
+        chunk = Chunk(
+            id=uuid4(),
+            tenant_id=TENANT_ID,
+            knowledge_base_id=KNOWLEDGE_BASE_ID,
+            version_id=upload.version.id,
+            content="conteúdo",
+            token_count=1,
+        )
+        await repository.persist_chunks_and_activate_version(
+            document_id=upload.document.id,
+            version_id=upload.version.id,
+            extracted_object_key="kb/extracted.txt",
+            chunks=[chunk],
+        )
+
+        result = await repository.get_documents_by_chunk_ids(chunk_ids=[chunk.id])
+
+        activated_document = await repository.get_document(document_id=upload.document.id)
+        assert result == {chunk.id: activated_document}
+
+    async def test_omits_unknown_chunk_ids_without_raising(
+        self, repository: InMemoryDocumentRepository
+    ) -> None:
+        result = await repository.get_documents_by_chunk_ids(chunk_ids=[uuid4()])
+
+        assert result == {}
+
+    async def test_empty_chunk_ids_returns_empty_dict_without_raising(
+        self, repository: InMemoryDocumentRepository
+    ) -> None:
+        assert await repository.get_documents_by_chunk_ids(chunk_ids=[]) == {}
+
+    async def test_resolves_multiple_chunks_across_different_documents(
+        self, repository: InMemoryDocumentRepository
+    ) -> None:
+        upload_a = await repository.create_document(
+            tenant_id=TENANT_ID,
+            knowledge_base_id=KNOWLEDGE_BASE_ID,
+            name="a.pdf",
+            mime_type="application/pdf",
+            checksum="21" * 32,
+            object_key="kb/a.pdf",
+            idempotency_key=None,
+        )
+        upload_b = await repository.create_document(
+            tenant_id=TENANT_ID,
+            knowledge_base_id=KNOWLEDGE_BASE_ID,
+            name="b.pdf",
+            mime_type="application/pdf",
+            checksum="22" * 32,
+            object_key="kb/b.pdf",
+            idempotency_key=None,
+        )
+        chunk_a = Chunk(
+            id=uuid4(),
+            tenant_id=TENANT_ID,
+            knowledge_base_id=KNOWLEDGE_BASE_ID,
+            version_id=upload_a.version.id,
+            content="conteúdo a",
+            token_count=1,
+        )
+        chunk_b = Chunk(
+            id=uuid4(),
+            tenant_id=TENANT_ID,
+            knowledge_base_id=KNOWLEDGE_BASE_ID,
+            version_id=upload_b.version.id,
+            content="conteúdo b",
+            token_count=1,
+        )
+        await repository.persist_chunks_and_activate_version(
+            document_id=upload_a.document.id,
+            version_id=upload_a.version.id,
+            extracted_object_key="kb/a-extracted.txt",
+            chunks=[chunk_a],
+        )
+        await repository.persist_chunks_and_activate_version(
+            document_id=upload_b.document.id,
+            version_id=upload_b.version.id,
+            extracted_object_key="kb/b-extracted.txt",
+            chunks=[chunk_b],
+        )
+
+        result = await repository.get_documents_by_chunk_ids(chunk_ids=[chunk_a.id, chunk_b.id])
+
+        activated_a = await repository.get_document(document_id=upload_a.document.id)
+        activated_b = await repository.get_document(document_id=upload_b.document.id)
+        assert result == {chunk_a.id: activated_a, chunk_b.id: activated_b}

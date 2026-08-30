@@ -31,6 +31,7 @@ uma janela de milissegundos é o cenário necessário para se manifestar).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
@@ -268,6 +269,23 @@ class PostgresDocumentRepository(DocumentRepositoryPort):
     async def get_document(self, *, document_id: UUID) -> Document | None:
         model = await self._session.get(DocumentModel, document_id)
         return _document_to_entity(model) if model is not None else None
+
+    async def get_documents_by_chunk_ids(
+        self, *, chunk_ids: Sequence[UUID]
+    ) -> dict[UUID, Document]:
+        if not chunk_ids:
+            return {}
+        stmt = (
+            select(ChunkModel.id, DocumentModel)
+            .join(DocumentVersionModel, DocumentVersionModel.id == ChunkModel.version_id)
+            .join(DocumentModel, DocumentModel.id == DocumentVersionModel.document_id)
+            .where(ChunkModel.id.in_(chunk_ids))
+        )
+        result = await self._session.execute(stmt)
+        return {
+            chunk_id: _document_to_entity(document_model)
+            for chunk_id, document_model in result.all()
+        }
 
     async def get_latest_version(self, *, document_id: UUID) -> DocumentVersion | None:
         stmt = (

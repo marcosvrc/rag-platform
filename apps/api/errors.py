@@ -24,6 +24,7 @@ from packages.application.errors import (
     InvalidRequestError,
     NotFoundError,
     PermissionDeniedError,
+    ServiceUnavailableError,
     UnprocessableEntityError,
 )
 from packages.contracts.problem_details import ProblemDetail
@@ -41,6 +42,7 @@ _STATUS_BY_APPLICATION_ERROR: dict[type[ApplicationError], int] = {
     NotFoundError: status.HTTP_404_NOT_FOUND,
     ConflictError: status.HTTP_409_CONFLICT,
     UnprocessableEntityError: status.HTTP_422_UNPROCESSABLE_CONTENT,
+    ServiceUnavailableError: status.HTTP_503_SERVICE_UNAVAILABLE,
 }
 
 

@@ -18,6 +18,7 @@ import pytest
 import packages.observability.tracing as tracing_module
 from packages.observability.tracing import (
     configure_tracing,
+    get_current_trace_id,
     instrument_fastapi_app,
     instrument_sqlalchemy_engine,
 )
@@ -146,3 +147,22 @@ def test_instrument_sqlalchemy_engine_delegates_to_the_instrumentor(
     instrument_sqlalchemy_engine(engine)  # type: ignore[arg-type]
 
     fake_instrumentor.instrument.assert_called_once_with(engine=engine)
+
+
+def test_get_current_trace_id_outside_any_span_returns_the_nil_uuid() -> None:
+    """Sem tracing habilitado (tracer no-op padrão), não há span ativo
+    — `get_current_span()` devolve `INVALID_SPAN`, trace ID 0 (RAG-044).
+    """
+    assert str(get_current_trace_id()) == "00000000-0000-0000-0000-000000000000"
+
+
+def test_get_current_trace_id_reflects_the_active_span(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_span_context = MagicMock()
+    fake_span_context.trace_id = 0x0102030405060708090A0B0C0D0E0F10
+    fake_span = MagicMock()
+    fake_span.get_span_context.return_value = fake_span_context
+    monkeypatch.setattr(tracing_module.trace, "get_current_span", MagicMock(return_value=fake_span))
+
+    trace_id = get_current_trace_id()
+
+    assert trace_id.int == 0x0102030405060708090A0B0C0D0E0F10

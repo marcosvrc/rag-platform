@@ -1725,3 +1725,199 @@ run_retrieval_evaluation.py` não tem teste direto — mesmo padrão já
 estabelecido no projeto para o que exige infraestrutura/rede real
 (adapters Postgres, RAG-044): mypy garante a corretude de tipos, a
 execução de verdade é responsabilidade de RAG-073/manual.
+## Validação de groundedness e citações (RAG-043)
+
+Passo 12 do fluxo de consulta (seção 12 do plano): depois do modelo
+responder (RAG-042), valida se a resposta pode ser confiada ao usuário
+— `packages/generation/groundedness.py`. Escopo deliberadamente
+restrito ao que o critério de aceite pede ("toda citação corresponde a
+chunk recuperado; resposta inválida usa fallback seguro"):
+
+- **Valida citações, não afirmações**: `extract_cited_chunk_ids()`
+  reconhece um `[chunk_id]` (formato de `citation_instruction`,
+  RAG-040) só quando o conteúdo entre colchetes é um UUID válido — um
+  colchete que não é uma citação (nota, o que for) é ignorado, nunca
+  tratado como citação inválida. `validate_groundedness()` então
+  compara as citações reconhecidas contra
+  `ContextBuildResult.included_evidence` (RAG-041, os chunks que de
+  fato entraram no contexto que o modelo viu): qualquer citação fora
+  desse conjunto é uma citação inventada. Verificar se o texto ao
+  redor de uma citação está de fato sustentado pelo conteúdo do chunk
+  citado (faithfulness, claim a claim) fica fora do escopo — isso é
+  avaliação (RAG-062, com LLM-juiz e o dataset dourado RAG-060), não
+  uma checagem barata de rodar em toda consulta em produção.
+- **"Resposta sem suporte"** é qualquer resposta com ZERO citações
+  válidas — nenhuma reconhecida, ou nenhuma que corresponda à evidência
+  incluída. Uma citação malformada (UUID errado, formato inventado)
+  nunca casa com nada, então cai no mesmo caminho: não abre uma brecha
+  separada.
+- **Caso especial**: a resposta idêntica (ignorando espaço nas pontas)
+  a `no_evidence_response` (`config/prompts/answer.v1.yaml`, RAG-040) é
+  sempre válida, mesmo sem nenhuma citação e mesmo que
+  `included_evidence` não esteja vazio — o modelo pode legitimamente
+  decidir que o contexto recebido não sustenta uma resposta. Sem esse
+  caso especial o comportamento correto do modelo seria marcado como
+  inválido só por não citar nada (inofensivo no texto final, já que o
+  fallback devolveria a mesma frase, mas contaminaria qualquer
+  auditoria/métrica de groundedness com falsos positivos).
+- **Fallback seguro reaproveita `no_evidence_response`**, a mesma frase
+  que já existe para "não há evidência suficiente" (passo 9, RAG-040) —
+  em vez de inventar uma segunda mensagem. Do ponto de vista de quem
+  pergunta, um threshold de recuperação insuficiente e uma citação
+  inválida são o mesmo desfecho: "não há uma resposta confiável para
+  dar".
+
+`enforce_groundedness()` é a função que RAG-044 chama de fato: valida e
+já devolve o texto final (`GroundednessOutcome.content` — a resposta
+original quando válida, `no_evidence_response` quando não) junto com
+`fallback_applied` e as citações (válidas/inválidas) reconhecidas, para
+auditoria/observabilidade, sem precisar rodar a validação de novo.
+`validate_groundedness()` fica exposta separadamente (só o diagnóstico,
+sem decidir o texto final) para quem quiser inspecionar o resultado
+sem aplicar o fallback.
+
+Testes: `tests/unit/test_groundedness.py` (100% de cobertura) — todas
+as combinações de citação (nenhuma, uma válida, uma inventada, mistura
+válida/inventada, malformada, repetida, múltiplas distintas), o caso
+especial de `no_evidence_response` (com e sem evidência incluída, com
+espaço nas pontas) e `enforce_groundedness` aplicando ou não o
+fallback.
+
+## Endpoint de consulta com geração (RAG-044)
+
+`POST /v1/knowledge-bases/{id}/query` (seção 10.3/10.5 do plano):
+integra recuperação (RAG-034), montagem de contexto (RAG-041), geração
+(RAG-042) e validação de groundedness (RAG-043), persistindo
+`QueryLog`/`QueryEvidence` (RAG-010) — o par de RAG-034 ("expor
+recuperação sem geração"), agora "com geração". O caso de uso
+(`packages/application/commands/query.py::answer_query`) segue os
+passos 9-14 da seção 12 do plano; os passos 1-8 são inteiramente
+`retrieve_evidence` (RAG-034), reaproveitado sem duplicação.
+
+**Passo 9 (limiar mínimo)**: `Settings.retrieval_minimum_score`
+(default `0.0`) compara o score "efetivo" de cada evidência (o de
+rerank quando reranking rodou de verdade, senão o de retrieval/RRF) —
+os dois nunca estão na mesma escala (RRF fica perto de 0; rerank
+costuma ser 0-1), então o default aceita qualquer evidência não vazia
+sem exigir calibração prévia (mesmo espírito de `reranker_enabled=False`).
+Sem nenhuma evidência acima do limiar — ou com o contexto montado
+(RAG-041) saindo vazio mesmo depois de passar no limiar por score
+individual — nenhuma chamada de geração acontece: a resposta já é
+`no_evidence_response` (RAG-040), registrada com o rótulo
+`NO_GENERATION_MODEL_LABEL` em `QueryLog.model` (nunca um alias de
+modelo que na verdade não foi invocado).
+
+**Passo 10 (orçamento de tokens)**: `Settings.
+generation_context_token_budget` (default `3000`, igual ao default de
+`context_builder.DEFAULT_TOKEN_BUDGET`) — o valor real depende da
+janela de contexto do modelo por trás do alias de geração escolhido.
+
+**Passo 11 (geração)**: alias resolvido pelo router
+(`get_default_generation_model()`/`get_default_generation_fallback_model()`,
+RAG-042) e passado como parâmetro explícito ao caso de uso — nenhum
+código em `packages/application` importa `packages.config.models`
+diretamente (mesma disciplina de decoupling da seção 5.1, aplicada à
+configuração). Uma falha do gateway depois de esgotar tentativas
+(`GenerationError`, RAG-042) vira `ServiceUnavailableError` (503, novo
+em `packages/application/errors.py`) — uma indisponibilidade real de
+infraestrutura, nunca confundida com "resposta sem suporte" (RAG-043,
+que só se aplica a UMA resposta que o modelo de fato gerou).
+
+**Passo 12 (groundedness)**: `enforce_groundedness` (RAG-043). Uma
+resposta é `grounded` quando tem pelo menos uma citação válida e o
+fallback não foi acionado — o próprio texto `no_evidence_response`
+(gerado pelo modelo por conta própria) também não é `grounded` (zero
+citações, mesmo sendo "válido" para RAG-043).
+
+**Citações resolvidas com um novo método de porta**:
+`DocumentRepositoryPort.get_documents_by_chunk_ids()` (novo, RAG-044) —
+o contrato da seção 10.5 do plano pede `document_id`/`document_name`
+por citação, e nenhuma atividade anterior precisou resolver
+`Chunk.version_id` -> `Document` (RAG-034 devolve só o chunk).
+Implementado tanto no fake em memória quanto no adapter Postgres (join
+`chunks` -> `document_versions` -> `documents`); omite silenciosamente
+um `chunk_id` sem documento resolvível, nunca levanta exceção. O
+`excerpt` de cada citação corta o conteúdo do chunk em
+`EXCERPT_MAX_CHARS` (300) caracteres — só para exibição, nunca afeta o
+texto que o modelo recebeu como contexto nem a validação de
+groundedness, que sempre usam o conteúdo completo.
+
+**Persistência (`QueryRepositoryPort`, novo)**: `persist_query()` grava
+`QueryLog` + todas as `QueryEvidence` juntas — sempre TODA a evidência
+recuperada (RAG-034), não só a que entrou no contexto: RAG-061
+(avaliação de retrieval) vai precisar do ranking completo,
+independente de quantas evidências couberam no orçamento de tokens.
+`question_hash` (SHA-256) nunca a pergunta em texto puro (seção 13 do
+plano: "logs não devem guardar... perguntas sensíveis integralmente").
+`trace_id` vem de `packages.observability.tracing.get_current_trace_id()`
+(novo): converte o trace ID de 128 bits do span ativo (OpenTelemetry,
+RAG-052) para `UUID` — fora de um span válido (tracing desligado), o
+resultado é o UUID nulo, um valor previsível, nunca uma exceção.
+
+Testes: `test_query_command.py` (caso de uso, com fakes em memória para
+toda porta — 100% de cobertura), `test_query_router.py` (visão HTTP,
+mesmo padrão de `test_retrieval_router.py`), extensões em
+`test_document_repository_in_memory.py` (`get_documents_by_chunk_ids`),
+novo `test_query_repository_in_memory.py`, e extensões em
+`test_tracing.py` para `get_current_trace_id`. Adapters Postgres novos
+(`adapters/query_repository/postgres.py`, o método novo de
+`adapters/document_repository/postgres.py`) seguem o mesmo padrão já
+estabelecido no projeto: sem teste direto (só integração, RAG-080,
+fecharia essa lacuna) — mypy garante a corretude de tipos.
+
+## Feedback (RAG-045)
+
+Endpoint `POST /v1/feedback` (seção 10.3 do plano): registra a
+avaliação do usuário (`Feedback`, seção 9 do plano; já modelado desde
+RAG-010, tabela `feedbacks` já migrada em RAG-011/migração 0002 — esta
+atividade não precisa de migração nova) sobre uma resposta já dada por
+`POST .../query` (RAG-044).
+
+**Standalone, não aninhado sob uma base de conhecimento**:
+`/v1/feedback` recebe `query_id` no corpo — a base de conhecimento já
+está implícita no `QueryLog` correspondente, então não há necessidade
+de `knowledge_base_id` na URL nem no payload.
+
+**`get_query_log`/`persist_feedback` vivem em `QueryRepositoryPort`**,
+não em uma porta nova: `Feedback` é sempre subordinado a um `QueryLog`
+já existente (FK `query_id`, `ondelete=CASCADE`), mesmo racional de
+`DocumentRepositoryPort` reunir `Document`+`DocumentVersion`+`IndexJob`
+numa porta só. `get_query_log` não filtra por tenant no nível da porta
+(mesmo padrão de `DocumentRepositoryPort.get_document`) — quem decide
+se o `tenant_id` do `QueryLog` encontrado corresponde ao do tenant
+autenticado é o caso de uso.
+
+**"respeita tenant; não permite feedback para query alheia"** (critério
+de aceite): `submit_feedback` (`packages/application/commands/
+feedback.py`) resolve `query_id` via `get_query_log` e levanta
+`NotFoundError` (404) tanto para uma consulta inexistente quanto para
+uma consulta de outro tenant — exatamente o mesmo erro nos dois casos,
+mesma disciplina "404, nunca 403" de todo o resto da API
+(RAG-012/RAG-021/RAG-034/RAG-044).
+
+**"valida rating e motivo"** (critério de aceite), interpretado nesta
+atividade como: `rating` só aceita os dois valores de `FeedbackRating`
+— qualquer outra string já é 422 automaticamente pela validação de
+enum do Pydantic, sem lógica extra necessária; `reason` é obrigatório
+quando `rating == NEGATIVE` (`model_validator` em
+`packages/contracts/feedback.py::FeedbackRequest`) — decisão desta
+atividade, já que o plano não elabora o que "validar motivo" significa
+concretamente, e um feedback negativo sem motivo não é acionável para
+quem for revisar a resposta depois. Para `POSITIVE`, `reason` continua
+opcional. Essa validação é de forma/contrato (422 na borda HTTP), não
+uma regra de negócio do caso de uso — mesma disciplina já usada no
+resto da API (validação de payload no contrato, regra de negócio no
+caso de uso).
+
+Testes: `test_feedback_command.py` (caso de uso, com fake em memória —
+100% de cobertura), `test_feedback_router.py` (visão HTTP, mesmo padrão
+de `test_query_router.py` — semeia um `QueryLog` diretamente via
+`InMemoryQueryRepository.persist_query`, sem precisar rodar o pipeline
+completo de consulta nem criar uma base de conhecimento), extensões em
+`test_query_repository_in_memory.py` para `get_query_log`/
+`persist_feedback`. O método novo de `adapters/query_repository/
+postgres.py` segue o mesmo padrão já estabelecido no projeto: sem teste
+direto (só integração, RAG-080, fecharia essa lacuna) — mypy garante a
+corretude de tipos.
+
+Com RAG-045, a épica E4 (Geração fundamentada) está completa.
