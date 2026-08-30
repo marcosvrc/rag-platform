@@ -5,7 +5,7 @@ PYTHON ?= python3.12
 VENV := .venv
 BIN := $(VENV)/bin
 
-.PHONY: venv install lint format typecheck test security run-api run-worker check clean
+.PHONY: venv install lint format typecheck test security run-api run-worker check rag-quality-gate clean
 
 venv:
 	$(PYTHON) -m venv $(VENV)
@@ -53,6 +53,21 @@ run-worker:
 # (RAG-070+) deve reproduzir. Falha se lint, tipos, testes ou cobertura
 # mínima (85%, ver [tool.coverage.report] em pyproject.toml) não passarem.
 check: lint typecheck test security
+
+# RAG-073 — reproduz localmente o quality gate de RAG: avaliação
+# reduzida (Recall@K/MRR + faithfulness/answer relevancy sobre os 3
+# primeiros casos respondíveis do dataset dourado) e verificação de
+# regressão contra a baseline aprovada (RAG-063). Ao contrário de
+# `make check`, exige um gateway LiteLLM alcançável (LITELLM_BASE_URL)
+# — chama modelos de verdade (seção 15 do plano), então nunca faz
+# parte de `check`/CI comum (RAG-070); só do workflow dedicado
+# `.github/workflows/rag-quality-gate.yml`.
+rag-quality-gate:
+	$(BIN)/python scripts/run_retrieval_evaluation.py --max-cases 3
+	$(BIN)/python scripts/run_generation_evaluation.py --max-cases 3
+	$(BIN)/python scripts/check_evaluation_baseline.py \
+		--report reports/retrieval-evaluation/retrieval-evaluation.json \
+		--report reports/generation-evaluation/generation-evaluation.json
 
 clean:
 	rm -rf $(VENV) .pytest_cache .ruff_cache .mypy_cache .coverage coverage.xml **/__pycache__

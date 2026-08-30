@@ -2083,3 +2083,78 @@ baseline zero sem divisão por zero, e o texto da mensagem de
 violação — 100% de cobertura); `test_check_evaluation_baseline.py`
 (extração de métricas de um ou mais relatórios, filtragem de
 booleanos, código de saída 0/1 — 100% de cobertura).
+
+## Quality gate de RAG no CI (RAG-073)
+
+Objetivo (seção 21 do plano): "executar avaliação reduzida em
+mudanças relevantes"; critério de aceite: "paths filters cobrem
+código, prompts, retrieval e modelos; relatório fica disponível no
+workflow".
+
+**`.github/workflows/rag-quality-gate.yml`** — novo workflow (convive
+com `pull-request.yml`/RAG-070 e `security.yml`/RAG-071, nenhum dos
+dois roda modelo real): dispara em toda PR contra `master` que toca
+`packages/retrieval/**`, `packages/generation/**`,
+`packages/evaluation/**`, `packages/application/queries/retrieval.py`,
+`packages/application/commands/query.py`, `adapters/vector_search/**`,
+`adapters/lexical_search/**`, `adapters/reranker/**`,
+`adapters/litellm/**`, `config/prompts/**`, `config/models/**`,
+`config/evaluation/**`, `datasets/golden/**` ou os três scripts de
+avaliação — e também sob demanda via `workflow_dispatch` (com um
+input `max_cases` para uma checagem manual mais ampla). Roda, nessa
+ordem: `scripts/run_retrieval_evaluation.py --max-cases N`,
+`scripts/run_generation_evaluation.py --max-cases N`,
+`scripts/check_evaluation_baseline.py` (comparando os dois relatórios
+contra `poc.v1.yaml`, RAG-063); publica os relatórios Markdown no
+resumo do workflow (`$GITHUB_STEP_SUMMARY`, critério de aceite
+"relatório fica disponível no workflow") e os JSON/Markdown como
+artefato (`actions/upload-artifact`); falha a PR se qualquer uma das
+três verificações falhar.
+
+**"Reduzida"**: em vez do dataset dourado inteiro (~35 casos
+respondíveis), avalia só os `N` primeiros (default 3) — `max_cases`,
+parâmetro novo desta atividade em `evaluate_retrieval`/
+`evaluate_generation` (`packages/evaluation/retrieval_evaluation.py`/
+`generation_evaluation.py`) e `--max-cases` nos dois scripts
+correspondentes. Manter o dataset dourado no tamanho mínimo do schema
+(30 casos, RAG-060) e reduzir só QUANTOS são de fato processados evita
+precisar de uma segunda versão "pequena" do dataset só para CI.
+
+**Por que este workflow não é bloqueado por "chamadas reais ficam em
+workflow manual ou agendado com orçamento limitado" (seção 15 do
+plano)**: ele PRÓPRIO é esse workflow com orçamento limitado — dedicado,
+fora de `pull-request.yml`/RAG-070 (que continua simulando todo
+provedor de LLM, inalterado) — só que reage a PRs relevantes via
+`paths` (o critério de aceite desta atividade exige exatamente isso) em
+vez de só manual/agendado, com o orçamento limitado por `--max-cases`
+em vez de por frequência de execução.
+
+**Por que o job pula sem bloquear quando não há gateway configurado**:
+este repositório ainda não cadastra nenhum secret de gateway LiteLLM
+real (nenhum workflow existente usa `secrets.*` além do `GITHUB_TOKEN`
+embutido, confirmado por `grep`) — rodar os scripts sem um gateway
+alcançável falharia com erro de conexão, não com uma métrica abaixo do
+limiar, o que bloquearia toda PR relevante por um motivo de
+infraestrutura ausente, não de qualidade do RAG. O job checa a
+presença de `secrets.LITELLM_BASE_URL` antes de qualquer chamada real
+e, se ausente, publica um aviso no resumo do workflow e termina com
+sucesso — cadastrar `LITELLM_BASE_URL` (e `LITELLM_API_KEY`, se o
+gateway exigir) como secrets do repositório ativa as chamadas de
+verdade sem nenhuma mudança neste arquivo. Este é o mesmo tipo de
+limitação já documentado em `config/evaluation/poc.v1.yaml`
+(`measured: false`).
+
+**`make rag-quality-gate`** — reproduz localmente os três passos
+reais do workflow (exige `LITELLM_BASE_URL` configurado no ambiente,
+ao contrário de `make check`); nunca faz parte de `make check`/CI
+comum, mesmo racional do workflow.
+
+Testes: `evaluate_retrieval`/`evaluate_generation` ganharam testes
+para `max_cases` (`test_retrieval_evaluation.py`,
+`test_generation_evaluation.py` — limita corretamente quantos casos
+são processados; um `max_cases` maior que o dataset avalia tudo, sem
+erro). O workflow em si (`rag-quality-gate.yml`) foi validado com
+`actionlint` (sem achados, incluindo os workflows já existentes) —
+não tem um teste unitário Python, mesmo padrão de qualquer outro
+arquivo `.github/workflows/*.yml` do projeto (nenhum deles é testado
+por `pytest`).

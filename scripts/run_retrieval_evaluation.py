@@ -20,8 +20,9 @@ embedding de verdade pode produzir). Por isso este script sempre usa
 nunca roda como parte de `pytest tests/unit` (seção 15 do plano:
 "Provedores de LLM devem ser simulados no CI comum. Chamadas reais
 ficam em workflow manual ou agendado com orçamento limitado"). Rodar
-isso de verdade fica para RAG-073 (quality gate de RAG no CI, ainda não
-implementado) ou uma execução manual.
+isso de verdade acontece no quality gate de CI (RAG-073,
+`.github/workflows/rag-quality-gate.yml`, com `--max-cases` reduzindo o
+orçamento de chamadas reais) ou por execução manual.
 
 ## Corpus de referência
 
@@ -87,6 +88,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=_DEFAULT_TOP_K)
     parser.add_argument("--minimum-recall-at-k", type=float, default=_DEFAULT_MINIMUM_RECALL_AT_K)
     parser.add_argument("--minimum-mrr", type=float, default=_DEFAULT_MINIMUM_MRR)
+    parser.add_argument(
+        "--max-cases",
+        type=int,
+        default=None,
+        help=(
+            "Avalia só os N primeiros casos respondíveis do dataset, não o dataset inteiro "
+            "(RAG-073: 'avaliação reduzida' do quality gate de CI). Default: sem limite."
+        ),
+    )
     parser.add_argument(
         "--reranker",
         choices=("passthrough", "litellm"),
@@ -178,6 +188,7 @@ async def _run(args: argparse.Namespace) -> int:
         tenant_id=tenant_id,
         knowledge_base_id=knowledge_base.id,
         top_k=args.top_k,
+        max_cases=args.max_cases,
     )
 
     threshold_check = check_thresholds(
