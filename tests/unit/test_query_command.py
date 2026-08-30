@@ -201,6 +201,7 @@ async def test_answer_query_with_no_evidence_never_calls_generation() -> None:
     assert answer.model == NO_GENERATION_MODEL_LABEL
     assert answer.token_usage.input_tokens == 0
     assert answer.token_usage.output_tokens == 0
+    assert answer.context_chunk_contents == ()
     assert fixture.generation_provider.received_prompts == []
 
 
@@ -296,6 +297,7 @@ async def test_answer_query_grounded_answer_returns_citation_with_resolved_docum
     assert citation.section == "Arquitetura"
     assert citation.excerpt == "a arquitetura é hexagonal"
     assert citation.score > 0.0
+    assert answer.context_chunk_contents == ("a arquitetura é hexagonal",)
 
 
 async def test_answer_query_persists_query_log_and_all_retrieved_evidence() -> None:
