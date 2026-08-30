@@ -116,6 +116,30 @@ class Settings(BaseSettings):
     # espírito de `reranker_enabled`: um fallback é uma rede de segurança
     # opcional, nunca uma dependência obrigatória do fluxo de geração.
     generation_fallback_enabled: bool = Field(default=False, alias="GENERATION_FALLBACK_ENABLED")
+    # RAG-044 (seção 12.1 do plano, passo 9 — "aplicar limiar mínimo";
+    # "responder 'não há evidência suficiente' quando nenhum chunk
+    # ultrapassar o limiar"): usa o score de rerank do chunk quando
+    # reranking está ativo, senão o score de retrieval (RRF) — os dois
+    # nunca estão na mesma escala (RRF fica perto de 0, ex. ~0.016 no
+    # topo; rerank costuma ser 0-1), então não há um valor "certo"
+    # único para os dois casos. Default 0.0: aceita qualquer evidência
+    # não vazia sem exigir calibração prévia (mesmo espírito de
+    # `reranker_enabled=False` — um recurso que precisa de calibração
+    # começa desligado/inerte); operar um limiar de verdade exige medir
+    # a distribuição de scores do reranker escolhido e configurar este
+    # valor de acordo.
+    retrieval_minimum_score: float = Field(default=0.0, alias="RETRIEVAL_MINIMUM_SCORE")
+    # RAG-044 (seção 12, passo 10 — "montar contexto dentro do
+    # orçamento de tokens"): o valor real depende da janela de contexto
+    # do modelo por trás do alias de geração escolhido
+    # (`config/models/generation.v1.yaml`) — nunca assumido pelo
+    # context builder (RAG-041) sozinho. Default igual a
+    # `packages.generation.context_builder.DEFAULT_TOKEN_BUDGET` (um
+    # valor conservador, sem depender de importar `packages.generation`
+    # a partir de `packages.config`).
+    generation_context_token_budget: int = Field(
+        default=3000, alias="GENERATION_CONTEXT_TOKEN_BUDGET"
+    )
 
     @property
     def database_url(self) -> str:
