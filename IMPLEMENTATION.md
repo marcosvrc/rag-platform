@@ -15,9 +15,8 @@ todo o projeto.
 
 ## Progresso do backlog
 
-32 das 48 atividades do plano estão mescladas em `master`; a RAG-060
-(dataset dourado de avaliação, seção abaixo) está implementada e
-aguardando merge da PR. As 15 atividades restantes:
+34 das 48 atividades do plano estão mescladas em `master`. As 14
+atividades restantes:
 
 - **E4 — Geração fundamentada**: RAG-042 (geração via LiteLLM),
   RAG-043 (validação de groundedness/citações), RAG-044 (endpoint
