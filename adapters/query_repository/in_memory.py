@@ -4,11 +4,14 @@ mesmo padrão de `adapters/document_repository/in_memory.py`."""
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from packages.application.ports.query_repository import QueryEvidenceInput, QueryRepositoryPort
+from packages.domain.entities.feedback import Feedback
 from packages.domain.entities.query_evidence import QueryEvidence
 from packages.domain.entities.query_log import QueryLog, TokenUsage
+from packages.domain.enums.feedback_rating import FeedbackRating
 
 
 class InMemoryQueryRepository(QueryRepositoryPort):
@@ -18,6 +21,7 @@ class InMemoryQueryRepository(QueryRepositoryPort):
         # `InMemoryAuditLog.events`: um atributo de inspeção só de
         # teste, nunca parte da porta abstrata.
         self.query_evidences: list[QueryEvidence] = []
+        self.feedbacks: list[Feedback] = []
 
     async def persist_query(
         self,
@@ -53,3 +57,25 @@ class InMemoryQueryRepository(QueryRepositoryPort):
             for item in evidence
         )
         return query_log
+
+    async def get_query_log(self, *, query_id: UUID) -> QueryLog | None:
+        return self.query_logs.get(query_id)
+
+    async def persist_feedback(
+        self,
+        *,
+        query_id: UUID,
+        rating: FeedbackRating,
+        reason: str | None,
+        expected_answer: str | None,
+    ) -> Feedback:
+        feedback = Feedback(
+            id=uuid4(),
+            query_id=query_id,
+            rating=rating,
+            reason=reason,
+            expected_answer=expected_answer,
+            created_at=datetime.now(UTC),
+        )
+        self.feedbacks.append(feedback)
+        return feedback
