@@ -1,0 +1,294 @@
+# rag-platform — dataset dourado de avaliação (RAG-060)
+#
+# Versão v1. Uma vez publicada (usada por uma execução de avaliação
+# real, RAG-061/062), esta versão é imutável — qualquer mudança de
+# conteúdo cria golden.v2.yaml, nunca edita este arquivo.
+# `packages/evaluation/golden_dataset.py::load_golden_dataset` carrega
+# por (id, version) explícitos.
+#
+# Corpus de referência: o próprio README.md deste repositório — um
+# corpus real, estável e versionado no repositório, disponível sem
+# depender de nenhuma infraestrutura viva (Postgres/embeddings) só
+# para existir. `document_id` aponta sempre para "README.md";
+# `section` é o título (sem o "## ") da seção onde a resposta está.
+#
+# `expected_evidence` não referencia `chunk_id`: um `chunk_id` é um
+# UUID gerado na indexação (muda a cada reindexação/ambiente) — em vez
+# disso, `content_contains` é o trecho que RAG-061 usa para casar um
+# chunk recuperado de verdade com a expectativa deste caso, por
+# conteúdo.
+#
+# Casos gc-036 a gc-040 são perguntas sem resposta (critério de aceite
+# da RAG-060): fora do escopo do que o README documenta, para testar
+# que o sistema responde "não há evidência suficiente" em vez de
+# inventar uma resposta.
+id: golden
+version: v1
+cases:
+- id: gc-001
+  question: Qual comando local roda o pipeline completo de lint, typecheck e testes de uma vez?
+  expected_answer: make check, que executa lint + typecheck + test.
+  expected_evidence:
+  - document_id: README.md
+    section: Desenvolvimento local
+    content_contains: lint + typecheck + test
+- id: gc-002
+  question: Qual é o gate mínimo de cobertura de testes configurado no projeto?
+  expected_answer: 85%, elevado a partir do RAG-004, quando o primeiro código de aplicação real passou a existir.
+  expected_evidence:
+  - document_id: README.md
+    section: Desenvolvimento local
+    content_contains: quando o primeiro código de aplicação real
+- id: gc-003
+  question: Como a aplicação evita que um segredo de configuração (como POSTGRES_PASSWORD) apareça em um log ou print acidental?
+  expected_answer: Segredos usam pydantic.SecretStr — repr(settings)/str(settings) sempre mostram asteriscos, nunca o valor real, então mesmo um log ou print acidental não expõe credenciais.
+  expected_evidence:
+  - document_id: README.md
+    section: Configuração da aplicação (RAG-004)
+    content_contains: não expõe credenciais
+- id: gc-004
+  question: O que a primeira migration (0001) do banco de dados faz?
+  expected_answer: Apenas habilita a extensão vector do PostgreSQL (CREATE EXTENSION IF NOT EXISTS vector) — as tabelas do modelo mínimo só são criadas depois, no RAG-011.
+  expected_evidence:
+  - document_id: README.md
+    section: Banco de dados e migrations (RAG-006)
+    content_contains: apenas habilita a extensão
+- id: gc-005
+  question: O endpoint /health/live depende do Postgres, Redis ou MinIO estarem alcançáveis?
+  expected_answer: Não — /health/live nunca depende de Postgres/Redis/MinIO, verifica só que o processo está no ar; checar essas dependências é papel do /health/ready.
+  expected_evidence:
+  - document_id: README.md
+    section: API (RAG-005)
+    content_contains: nunca depende de Postgres/Redis/MinIO
+- id: gc-006
+  question: Em que formato a API devolve erros dos endpoints de negócio?
+  expected_answer: Problem Details (RFC 7807, application/problem+json) — nunca uma stack trace.
+  expected_evidence:
+  - document_id: README.md
+    section: Tratamento de erros (RAG-013)
+    content_contains: nunca uma stack trace
+- id: gc-007
+  question: Uma requisição para uma base de conhecimento que pertence a outro tenant recebe 403 ou 404?
+  expected_answer: 404, nunca 403 — é tratada exatamente como se não existisse, para não vazar a existência de recursos de outro tenant.
+  expected_evidence:
+  - document_id: README.md
+    section: Bases de conhecimento (RAG-012)
+    content_contains: nunca 403
+- id: gc-008
+  question: Quantos jobs independentes o workflow de pull request roda em toda PR contra master?
+  expected_answer: 'Quatro jobs independentes, executados em paralelo: lint, typecheck, testes unitários + validação do OpenAPI, e validação de migrations.'
+  expected_evidence:
+  - document_id: README.md
+    section: CI (RAG-070)
+    content_contains: quatro jobs independentes
+- id: gc-009
+  question: O que precisa acompanhar uma entrada em security/exceptions.yml para uma supressão de segurança ser considerada legítima?
+  expected_answer: Justificativa (justification) e prazo (expires, no formato AAAA-MM-DD) — o job de CI falha a PR se uma entrada estiver incompleta ou vencida.
+  expected_evidence:
+  - document_id: README.md
+    section: Segurança no CI (RAG-071)
+    content_contains: job falha a PR se uma entrada estiver incompleta
+- id: gc-010
+  question: As entidades de domínio em packages/domain/entities são mutáveis ou imutáveis?
+  expected_answer: Imutáveis — todas são modelos Pydantic com frozen=True e sem campos extras.
+  expected_evidence:
+  - document_id: README.md
+    section: Domínio (RAG-010)
+    content_contains: modelos Pydantic imutáveis
+- id: gc-011
+  question: Um Document pode transicionar diretamente de FAILED de volta para PROCESSING, como um retry automático?
+  expected_answer: Não — esse caminho de retry a partir de FAILED/QUARANTINED foi deliberadamente deixado fora das transições permitidas; qualquer transição fora da lista levanta InvalidStatusTransitionError.
+  expected_evidence:
+  - document_id: README.md
+    section: Domínio (RAG-010)
+    content_contains: incluindo, deliberadamente, um
+- id: gc-012
+  question: Por que a migration do schema inicial (0002) ainda não cria um índice pgvector (ivfflat/hnsw) na coluna chunks.embedding?
+  expected_answer: Porque o modelo/alias de embeddings — e portanto a dimensão do vetor — só é escolhido depois (RAG-025/030), e um índice pgvector exige dimensão fixa para existir.
+  expected_evidence:
+  - document_id: README.md
+    section: Schema inicial (RAG-011)
+    content_contains: não tem dimensão fixa ainda
+- id: gc-013
+  question: O que o método upload() de ObjectStoragePort sempre devolve, e para que serve?
+  expected_answer: 'O SHA-256 calculado sobre os bytes enviados — quem chama compara esse valor com o checksum esperado (ex.: o checksum do Document) para detectar corrupção.'
+  expected_evidence:
+  - document_id: README.md
+    section: Armazenamento de objetos (RAG-020)
+    content_contains: sempre devolve o SHA-256
+- id: gc-014
+  question: O que docker compose down -v faz com os dados dos serviços locais (Postgres, Redis, MinIO etc.)?
+  expected_answer: Remove tudo, inclusive os dados — os volumes Docker nomeados de cada serviço são apagados.
+  expected_evidence:
+  - document_id: README.md
+    section: Serviços locais (RAG-003)
+    content_contains: remove tudo, inclusive os dados
+- id: gc-015
+  question: Quais formatos de arquivo são aceitos no upload de documentos?
+  expected_answer: PDF, Markdown, TXT e DOCX — fixos pela seção 2 do plano, não configuráveis por ambiente.
+  expected_evidence:
+  - document_id: README.md
+    section: Upload de documentos (RAG-021)
+    content_contains: PDF, Markdown, TXT e DOCX
+- id: gc-016
+  question: O que acontece se a mesma Idempotency-Key de upload for reusada numa requisição com um conteúdo diferente?
+  expected_answer: A requisição retorna 409 — a mesma chave reusada para uma requisição diferente é tratada como conflito.
+  expected_evidence:
+  - document_id: README.md
+    section: Upload de documentos (RAG-021)
+    content_contains: reusada para uma requisição diferente retorna
+- id: gc-017
+  question: Quantas tentativas totais um IndexJob tem antes de uma falha ser considerada definitiva?
+  expected_answer: 5 tentativas no total, com backoff exponencial, jitter e um teto de 10 minutos entre elas.
+  expected_evidence:
+  - document_id: README.md
+    section: Fila e worker de indexação (RAG-022)
+    content_contains: 5 tentativas no total
+- id: gc-018
+  question: Que algoritmo de JWT o modo local simulado de autenticação usa?
+  expected_answer: HS256, com um segredo compartilhado (JWT_SECRET) configurado via .env — não há um provedor OIDC real em modo local.
+  expected_evidence:
+  - document_id: README.md
+    section: Autenticação JWT (RAG-050)
+    content_contains: apenas um segredo compartilhado
+- id: gc-019
+  question: Um JWT assinado corretamente mas sem a claim tenant_id é aceito para autorizar uma requisição?
+  expected_answer: Não — mesmo um token válido sem tenant_id vira 401, porque o token não carrega a informação mínima exigida (não é uma questão de permissão).
+  expected_evidence:
+  - document_id: README.md
+    section: Autorização e contexto do tenant (RAG-051)
+    content_contains: não carrega a informação mínima exigida
+- id: gc-020
+  question: O que o campo untrusted_context_notice do prompt de resposta declara ao modelo?
+  expected_answer: Que o conteúdo recuperado é dado, não instrução — qualquer comando embutido nos documentos recuperados deve ser ignorado.
+  expected_evidence:
+  - document_id: README.md
+    section: Prompt de resposta (RAG-040)
+    content_contains: é dado, não instrução
+- id: gc-021
+  question: Hoje, o parser de documentos do projeto (Docling) consegue extrair o conteúdo de um PDF com sucesso?
+  expected_answer: Não — um PDF levanta UnsupportedDocumentFormatError por enquanto; é uma limitação temporária (falta de egress para baixar pesos de modelo), não uma decisão definitiva de excluir PDF.
+  expected_evidence:
+  - document_id: README.md
+    section: Extração de conteúdo (RAG-023)
+    content_contains: não é uma decisão definitiva de excluir PDF
+- id: gc-022
+  question: Quais são os defaults de tamanho, sobreposição e tamanho mínimo de chunk usados no chunking de documentos?
+  expected_answer: Tamanho 500 tokens, sobreposição 75 tokens e mínimo 50 tokens.
+  expected_evidence:
+  - document_id: README.md
+    section: Normalização e chunking (RAG-024)
+    content_contains: tamanho 500 tokens, sobreposição 75, mínimo 50
+- id: gc-023
+  question: Por que o chunking de documentos não usa um tokenizer real como o tiktoken para contar tokens?
+  expected_answer: Porque o tiktoken baixa o vocabulário BPE em runtime na primeira chamada, e o ambiente não tem egress liberado para isso; em vez disso, usa-se uma aproximação determinística por contagem de palavras/pontuação via regex.
+  expected_evidence:
+  - document_id: README.md
+    section: Normalização e chunking (RAG-024)
+    content_contains: não usamos um tokenizer real
+- id: gc-024
+  question: O adapter de embeddings via LiteLLM (LiteLLMEmbeddingProvider) usa a SDK Python litellm ou chamadas HTTP diretas?
+  expected_answer: Chamadas HTTP diretas via httpx contra o gateway LiteLLM — não a SDK Python litellm, que rotearia para provedores diretamente e duplicaria o papel do gateway.
+  expected_evidence:
+  - document_id: README.md
+    section: Embeddings via LiteLLM (RAG-025)
+    content_contains: não a SDK Python
+- id: gc-025
+  question: 'Qual estratégia persist_chunks_and_activate_version usa para substituir os chunks de uma versão de documento: DELETE + INSERT, ou um diff incremental?'
+  expected_answer: DELETE + INSERT, nunca diff — reprocessar a mesma versão nunca duplica chunks, só substitui o conjunto inteiro.
+  expected_evidence:
+  - document_id: README.md
+    section: Persistência de chunks e ativação de versão (RAG-026)
+    content_contains: A estratégia é DELETE + INSERT
+- id: gc-026
+  question: Disparar uma reindexação de documento muda imediatamente o Document.status ou a versão ativa consultada pelos clientes?
+  expected_answer: Não — isso só muda quando o worker de fato processa o novo job; entre o disparo e essa ativação, o cliente continua recebendo a versão ativa anterior em qualquer consulta, nunca um estado parcial.
+  expected_evidence:
+  - document_id: README.md
+    section: Status de indexação e reindexação (RAG-027)
+    content_contains: nunca um estado parcial da reindexação em andamento
+- id: gc-027
+  question: 'Que configuração de idioma a coluna gerada content_tsv (busca lexical) usa: ''portuguese'' ou ''simple''?'
+  expected_answer: '''simple'' — um denominador comum seguro sem stemming específico de idioma, já que o conteúdo de um chunk pode estar em qualquer idioma que o tenant carregar.'
+  expected_evidence:
+  - document_id: README.md
+    section: Busca lexical (RAG-031)
+    content_contains: denominador comum seguro
+- id: gc-028
+  question: Uma falha ao registrar um evento de auditoria (por exemplo, banco indisponível) derruba a ação administrativa que já teve sucesso?
+  expected_answer: Não — record_audit_event_safely registra a falha via logging mas sempre retorna normalmente, para não trocar uma falha de observabilidade por uma indisponibilidade real da API.
+  expected_evidence:
+  - document_id: README.md
+    section: Auditoria de ações administrativas (RAG-054)
+    content_contains: nunca deve derrubar a ação administrativa
+- id: gc-029
+  question: Qual é o valor padrão da variável OTEL_TRACES_ENABLED, que liga ou desliga a instrumentação de tracing?
+  expected_answer: false — sem ela, a instrumentação continua ativa, mas contra o tracer no-op padrão do OpenTelemetry, com zero overhead.
+  expected_evidence:
+  - document_id: README.md
+    section: Tracing distribuído (RAG-052)
+    content_contains: OTEL_TRACES_ENABLED
+- id: gc-030
+  question: Qual modelo de embeddings foi escolhido para rodar por trás do alias embedding-model-alias, e qual sua dimensão nativa?
+  expected_answer: Qwen3-Embedding-0.6B, self-hospedado via Ollama, com dimensão nativa de 1.024.
+  expected_evidence:
+  - document_id: README.md
+    section: Busca vetorial e provisionamento do gateway de embeddings (RAG-030)
+    content_contains: Qwen3-Embedding-0.6B
+- id: gc-031
+  question: Por que o projeto escolheu Ollama em vez de Text Embeddings Inference (TEI) para servir o modelo de embeddings?
+  expected_answer: Porque o TEI tem um histórico documentado de falhas rodando o Qwen3-Embedding-0.6B especificamente em CPU; o Ollama usa llama.cpp, maduro e desenhado para CPU, evitando essa classe de problema.
+  expected_evidence:
+  - document_id: README.md
+    section: Busca vetorial e provisionamento do gateway de embeddings (RAG-030)
+    content_contains: histórico documentado de falhas
+- id: gc-032
+  question: As métricas de consumo (como record_document_uploaded) usam tenant_id ou document_id como label do Prometheus?
+  expected_answer: Não — nenhum label de cardinalidade livre como tenant_id ou document_id é usado; todo label vem de um conjunto fixo e pequeno, como mime_type, action e status.
+  expected_evidence:
+  - document_id: README.md
+    section: Métricas Prometheus (RAG-053)
+    content_contains: todo label vem de um conjunto fixo e pequeno
+- id: gc-033
+  question: O workflow que publica as imagens da API e do worker no GHCR roda em toda pull request, ou só quando o código é mesclado em master?
+  expected_answer: Só a cada push em master — na prática, a cada PR mergeada; nunca roda em uma PR de branch de feature, porque publicar uma imagem de um branch de feature não teria consumidor.
+  expected_evidence:
+  - document_id: README.md
+    section: Publicação de imagens no GHCR (RAG-072)
+    content_contains: a cada push em
+- id: gc-034
+  question: O que rerank_safely devolve quando a chamada ao reranker sofre timeout?
+  expected_answer: Os candidatos originais, na ordem que a fusão RRF já havia produzido, truncados a top_n — nunca propaga a exceção, porque reranking nunca deve derrubar uma consulta inteira.
+  expected_evidence:
+  - document_id: README.md
+    section: Reranker (RAG-033)
+    content_contains: nunca deve derrubar uma consulta inteira
+- id: gc-035
+  question: O endpoint retrieve (RAG-034) já gera uma resposta em linguagem natural usando um modelo de linguagem?
+  expected_answer: Não — o endpoint expõe só a recuperação (busca vetorial e lexical, fusão RRF e reranking); a geração de resposta fica para RAG-042/043.
+  expected_evidence:
+  - document_id: README.md
+    section: Endpoint retrieve (RAG-034)
+    content_contains: Sem geração de resposta
+- id: gc-036
+  question: Qual é o SLA contratual de disponibilidade (uptime) garantido aos clientes da plataforma?
+  expected_answer: null
+  expected_evidence: []
+  notes: Não há um SLA contratual documentado — a seção 21 do plano lista metas internas de desempenho da POC, não um compromisso contratual de uptime.
+- id: gc-037
+  question: Quanto custa, em dólares por mês, rodar esta plataforma na configuração de produção recomendada?
+  expected_answer: null
+  expected_evidence: []
+- id: gc-038
+  question: A plataforma tem um aplicativo mobile nativo para consultar as bases de conhecimento?
+  expected_answer: null
+  expected_evidence: []
+- id: gc-039
+  question: Qual foi o faithfulness medido em produção depois de seis meses de operação da plataforma?
+  expected_answer: null
+  expected_evidence: []
+  notes: 'Trap deliberado: existe uma meta inicial de faithfulness para a POC (seção 21 do plano), mas nenhum valor medido em produção depois de um período de operação — o modelo não deve confundir uma meta com uma métrica real.'
+- id: gc-040
+  question: Quem é o Data Protection Officer (DPO) responsável pela plataforma perante a LGPD?
+  expected_answer: null
+  expected_evidence: []
