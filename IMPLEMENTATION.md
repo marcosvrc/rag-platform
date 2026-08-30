@@ -1,206 +1,591 @@
-# rag-platform
+# rag-platform — notas de implementação
 
-Plataforma self-service de RAG (Retrieval-Augmented Generation) multi-tenant: ingestão de documentos, recuperação híbrida (vetorial + lexical), geração de respostas fundamentada em citações, avaliação de qualidade, governança e observabilidade de ponta a ponta.
+Este arquivo detalha, atividade por atividade (`RAG-XXX`, conforme o
+backlog de `rag-platform-llm-implementation-plan.md`), as decisões de
+design, limitações conhecidas e cobertura de testes de cada
+funcionalidade já implementada. A visão geral do projeto — o que é,
+tecnologias, arquitetura e estrutura de diretórios — está no
+[README.md](README.md); este arquivo existe para não sobrecarregar o
+README com o histórico de decisões de cada atividade, que só interessa
+a quem vai alterar ou revisar o código dessa área específica.
 
-[![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-async%20API-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![Pydantic](https://img.shields.io/badge/Pydantic-v2-E92063?logo=pydantic&logoColor=white)](https://docs.pydantic.dev/)
-[![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-async-D71F00?logo=sqlalchemy&logoColor=white)](https://www.sqlalchemy.org/)
-[![Alembic](https://img.shields.io/badge/Alembic-migrations-6BA539)](https://alembic.sqlalchemy.org/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
-[![pgvector](https://img.shields.io/badge/pgvector-busca%20vetorial-4169E1)](https://github.com/pgvector/pgvector)
-[![Redis](https://img.shields.io/badge/Redis-broker-DC382D?logo=redis&logoColor=white)](https://redis.io/)
-[![Celery](https://img.shields.io/badge/Celery-workers%20async-37814A?logo=celery&logoColor=white)](https://docs.celeryq.dev/)
-[![MinIO](https://img.shields.io/badge/MinIO-object%20storage-C72E49?logo=minio&logoColor=white)](https://min.io/)
-[![LiteLLM](https://img.shields.io/badge/LiteLLM-AI%20gateway-0EA5E9)](https://www.litellm.ai/)
-[![Ollama](https://img.shields.io/badge/Ollama-embeddings-000000?logo=ollama&logoColor=white)](https://ollama.com/)
-[![Docling](https://img.shields.io/badge/Docling-extração%20de%20documentos-1A73E8)](https://github.com/docling-project/docling)
-[![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-tracing-425CC7?logo=opentelemetry&logoColor=white)](https://opentelemetry.io/)
-[![Prometheus](https://img.shields.io/badge/Prometheus-métricas-E6522C?logo=prometheus&logoColor=white)](https://prometheus.io/)
-[![Grafana](https://img.shields.io/badge/Grafana-dashboards-F46800?logo=grafana&logoColor=white)](https://grafana.com/)
-[![Docker Compose](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
-[![GitHub Actions](https://img.shields.io/badge/CI%2FCD-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white)](.github/workflows)
-[![Ruff](https://img.shields.io/badge/Lint-Ruff-D7FF64?logo=ruff&logoColor=black)](https://docs.astral.sh/ruff/)
-[![Mypy](https://img.shields.io/badge/Typecheck-Mypy-2A6DB2)](https://mypy-lang.org/)
-[![Pytest](https://img.shields.io/badge/Tests-Pytest-0A9EDC?logo=pytest&logoColor=white)](https://docs.pytest.org/)
+Cada seção abaixo corresponde a uma branch/PR já mesclada (ou, quando
+indicado, a uma PR ainda aberta) — a mesma unidade de entrega usada em
+todo o projeto.
 
-## Visão geral
+## Progresso do backlog
 
-O `rag-platform` deixa qualquer time criar bases de conhecimento, enviar documentos (PDF, Markdown, TXT, DOCX) e consultá-los por linguagem natural, recebendo respostas fundamentadas — sempre com citação da evidência usada, nunca uma afirmação inventada quando não há evidência suficiente. É multi-tenant desde a base: todo dado é isolado por `tenant_id`, e um recurso de outro tenant nunca é distinguível de um recurso inexistente (404, nunca 403).
+32 das 48 atividades do plano estão mescladas em `master`; a RAG-060
+(dataset dourado de avaliação, seção abaixo) está implementada e
+aguardando merge da PR. As 15 atividades restantes:
 
-O projeto está sendo construído de forma incremental a partir de um backlog de atividades (`RAG-XXX`) descrito em [`rag-platform-llm-implementation-plan.md`](rag-platform-llm-implementation-plan.md) — o documento de referência para requisitos, arquitetura-alvo e critérios de aceite de cada atividade. Cada atividade é entregue em uma branch/PR separada, com lint, checagem de tipos, testes com cobertura, migrations e segurança (SAST/SCA/secret scanning) validados antes do merge.
+- **E4 — Geração fundamentada**: RAG-042 (geração via LiteLLM),
+  RAG-043 (validação de groundedness/citações), RAG-044 (endpoint
+  `query`), RAG-045 (feedback).
+- **E6 — Avaliação RAG**: RAG-061 (avaliação de retrieval), RAG-062
+  (avaliação de geração), RAG-063 (baseline da POC).
+- **E7 — GitHub Actions e entrega**: RAG-073 (quality gate de
+  avaliação RAG), RAG-074, RAG-075.
+- **E8 — Finalização**: RAG-080, RAG-081, RAG-082, RAG-083.
 
-As decisões de design e limitações conhecidas de cada atividade já implementada estão documentadas em [`IMPLEMENTATION.md`](IMPLEMENTATION.md) — este README foca no panorama do projeto: o que é, com quais tecnologias, a arquitetura e a estrutura de diretórios.
+## Configuração da aplicação (RAG-004)
 
-## Tecnologias
 
-**API e aplicação**
-- **Python 3.12** — linguagem de todo o backend (API, workers, scripts).
-- **FastAPI** — API HTTP assíncrona (`/v1/...`), com `TestClient`/`app.openapi()` validados em CI.
-- **Pydantic v2** — validação de contratos HTTP, configuração da aplicação (Pydantic Settings) e entidades de domínio (modelos imutáveis, `frozen=True`).
-- **SQLAlchemy (async) + Alembic** — ORM e migrations versionadas contra PostgreSQL, via `asyncpg`.
+Toda variável de ambiente da aplicação é lida e validada por
+`packages/config/settings.py`, via Pydantic Settings — nenhum outro
+módulo deve chamar `os.environ` diretamente. Ponto de entrada:
+`get_settings()` (cacheado por processo).
 
-**Dados e mensageria**
-- **PostgreSQL 16 + pgvector** — banco relacional único, também usado para busca vetorial (índice HNSW) e busca lexical (Full Text Search nativo, índice GIN) — sem um banco vetorial separado.
-- **Redis** — broker e result backend do Celery.
-- **Celery** — fila e workers assíncronos (indexação de documentos, e futuramente avaliação).
-- **MinIO (S3-compatible)** — armazenamento dos arquivos originais enviados, via `aioboto3`.
+- Campos com default (hosts, portas, nomes de banco) refletem os valores
+  do `docker-compose.yml` (RAG-003) quando a API/worker rodam no host.
+- Campos sem default (`POSTGRES_PASSWORD`, `MINIO_ROOT_PASSWORD`) são
+  obrigatórios: se ausentes — no ambiente ou em um `.env` — a aplicação
+  falha na inicialização com `ConfigurationError`, cuja mensagem cita
+  apenas o nome da variável faltante, nunca um valor.
+- Segredos usam `pydantic.SecretStr`: `repr(settings)`/`str(settings)`
+  sempre mostram `**********`, então mesmo um log ou `print` acidental
+  não expõe credenciais.
 
-**IA e recuperação**
-- **LiteLLM** — gateway único para embeddings, reranking e geração, por trás de aliases versionados (`config/models/`) — trocar o modelo real por trás de um alias é configuração do gateway, não do código.
-- **Ollama** — serve o modelo de embeddings self-hospedado (Qwen3-Embedding-0.6B) via `llama.cpp`, sem depender de um provedor pago.
-- **Docling** — extração de texto e metadados de documentos (Markdown, TXT e DOCX hoje; PDF é uma limitação temporária, ver `IMPLEMENTATION.md`).
-- Fusão **RRF (Reciprocal Rank Fusion)** dos rankings vetorial + lexical, e reranking por cross-encoder configurável.
+## Banco de dados e migrations (RAG-006)
 
-**Observabilidade e segurança**
-- **OpenTelemetry** — tracing distribuído (API + worker) e métricas técnicas/de negócio, sem captura de conteúdo sensível.
-- **Prometheus + Grafana** — coleta e dashboards das métricas exportadas.
-- **JWT (PyJWT)** — autenticação e resolução de tenant; modo local simulado explicitamente não-produtivo.
-- **gitleaks, bandit, pip-audit, hadolint** — secret scanning, SAST, SCA e lint de Dockerfile no CI, com governança de exceções (`security/exceptions.yml`).
 
-**Qualidade e entrega**
-- **Ruff, Mypy, Pytest (+ cobertura)** — lint, checagem de tipos e testes; gate mínimo de cobertura em 85%.
-- **Docker + Docker Compose** — ambiente local completo (Postgres, Redis, MinIO, Ollama, LiteLLM, OTel Collector, Prometheus, Grafana) e imagens de produção da API/worker.
-- **GitHub Actions** — CI em toda PR (lint, typecheck, testes, migrations, segurança) e publicação de imagens no GHCR a cada push em `master`.
-
-## Arquitetura
-
-Arquitetura hexagonal (portas e adaptadores): o domínio e os casos de uso (`packages/domain`, `packages/application`) não importam nenhum framework de infraestrutura — nem SQLAlchemy, nem um cliente HTTP, nem um SDK de nuvem. Toda dependência externa é uma **porta** (uma interface Python) com um ou mais **adapters** concretos, trocáveis sem tocar o domínio (por exemplo, `KnowledgeBaseRepositoryPort` tem um adapter em memória para testes e um adapter Postgres para produção).
-
-```mermaid
-flowchart TB
-    subgraph Cliente
-        C[Cliente HTTP]
-    end
-
-    subgraph API["apps/api — FastAPI"]
-        R["Routers /v1/..."]
-    end
-
-    subgraph APP["packages/application — casos de uso"]
-        CMD["commands (escrita)"]
-        QRY["queries (leitura)"]
-    end
-
-    subgraph DOM["packages/domain — regras de negócio puras"]
-        ENT["entidades (Tenant, KnowledgeBase, Document, Chunk, ...)"]
-    end
-
-    subgraph PORTS["portas (interfaces)"]
-        P1[ObjectStoragePort]
-        P2[DocumentRepositoryPort]
-        P3[VectorSearchPort / LexicalSearchPort]
-        P4[EmbeddingProviderPort / RerankerPort]
-        P5[JobQueuePort / TokenVerifierPort / AuditLogPort]
-    end
-
-    subgraph ADAPT["adapters — infraestrutura concreta"]
-        A1[(MinIO / S3)]
-        A2[(PostgreSQL + pgvector)]
-        A3[LiteLLM gateway → Ollama]
-        A4[(Redis + Celery)]
-    end
-
-    subgraph WORKER["apps/indexing_worker — Celery"]
-        W[Pipeline de indexação]
-    end
-
-    C --> R --> CMD & QRY --> ENT
-    CMD & QRY --> P1 & P2 & P3 & P4 & P5
-    P1 --> A1
-    P2 & P3 --> A2
-    P4 --> A3
-    P5 --> A4
-    A4 --> W --> A2
-```
-
-**Fluxo de ingestão** (upload → indexação): o cliente envia um documento (`POST /v1/knowledge-bases/{id}/documents`), que é validado, armazenado no object storage e enfileirado como `IndexJob`. Um worker Celery consome o job, extrai o conteúdo (Docling), normaliza e divide em chunks determinísticos, gera embeddings em lote (LiteLLM/Ollama) e persiste tudo numa única transação que ativa a nova versão do documento — sem nunca deixar uma versão parcialmente indexada visível.
-
-**Fluxo de consulta** (retrieval → geração, em construção): a pergunta é embedada e buscada em paralelo por similaridade vetorial e por full-text search; os dois rankings são combinados por RRF e reordenados por um reranker configurável; as evidências resultantes alimentam a construção de contexto (dentro de um orçamento de tokens) e a geração de resposta fundamentada, sempre citando a evidência usada — sem evidência suficiente, a resposta é a recusa explícita, nunca uma invenção.
-
-**Isolamento multi-tenant**: toda consulta ao banco recebe `tenant_id` explicitamente (nunca um filtro implícito ou global); a identidade e o tenant são resolvidos a partir de um JWT verificado em cada requisição; um recurso de outro tenant é sempre 404, nunca 403 — para não vazar nem a existência do recurso.
-
-**Erros e observabilidade**: toda resposta de erro segue [Problem Details](https://www.rfc-editor.org/rfc/rfc7807) (RFC 7807), nunca uma stack trace; toda requisição, upload, indexação e (futuramente) consulta é rastreada via OpenTelemetry e instrumentada com métricas Prometheus, sem capturar conteúdo sensível em nenhuma das duas.
-
-## Estrutura do projeto
-
-```text
-rag-platform/
-├── apps/                      # pontos de entrada dos processos
-│   ├── api/                   # FastAPI: routers, dependencies, main.py
-│   ├── indexing_worker/       # worker Celery de indexação
-│   └── evaluation_worker/     # worker de avaliação (E6, em construção)
-├── packages/                  # domínio e lógica de aplicação (sem infra)
-│   ├── domain/                # entidades, enums, exceções — regras puras
-│   ├── application/           # casos de uso (commands/queries) + portas
-│   ├── contracts/              # schemas Pydantic dos endpoints HTTP
-│   ├── config/                # Settings (Pydantic Settings) e aliases de modelo
-│   ├── generation/             # prompt versionado, context builder
-│   ├── retrieval/              # fusão RRF
-│   ├── ingestion/               # normalização e chunking
-│   ├── evaluation/             # schema do dataset dourado
-│   └── observability/          # tracing e métricas (OpenTelemetry)
-├── adapters/                   # implementações concretas de cada porta
-│   # postgres/, object_storage/, queue/, docling/, litellm/, reranker/,
-│   # vector_search/, lexical_search/, token_verifier/, audit_log/,
-│   # document_repository/, document_processor/,
-│   # knowledge_base_repository/, evaluation/
-├── migrations/                 # Alembic (schema versionado)
-├── config/                     # YAML versionado: prompts/, models/, retrieval/
-├── datasets/golden/             # dataset dourado de avaliação
-├── deploy/                     # compose/ e observability/ (dashboards Grafana)
-├── scripts/                     # utilitários (ex.: mintar token JWT local)
-├── security/                    # exceções de segurança (`exceptions.yml`)
-├── tests/                       # unit/, integration/, contract/, e2e/, evaluation/
-├── .github/workflows/            # CI (PR) e segurança
-├── docker-compose.yml            # ambiente local completo
-├── Dockerfile.api / Dockerfile.worker
-├── README.md                     # este arquivo
-├── IMPLEMENTATION.md              # decisões de implementação por atividade
-└── rag-platform-llm-implementation-plan.md   # backlog e requisitos de referência
-```
-
-## Como rodar localmente
-
-Pré-requisito: Python 3.12 e Docker.
+Com o PostgreSQL do `docker compose` (RAG-003) no ar e um `.env` válido
+(RAG-004):
 
 ```bash
-cp .env.example .env        # ajuste credenciais/portas se quiser
-docker compose up -d        # Postgres+pgvector, Redis, MinIO, Ollama, LiteLLM, OTel, Prometheus, Grafana
-docker compose ps           # aguarde todos ficarem "healthy"
-
-make install                # cria .venv e instala dependências de desenvolvimento
-.venv/bin/alembic upgrade head   # aplica as migrations
-
-make run-api                # sobe a API em http://localhost:8000
+.venv/bin/alembic upgrade head    # aplica todas as migrations pendentes
+.venv/bin/alembic downgrade -1    # desfaz a última
+.venv/bin/alembic current         # mostra a revisão atual
 ```
+
+A primeira migration (`0001`) apenas habilita a extensão `vector`
+(`CREATE EXTENSION IF NOT EXISTS vector`) — as tabelas do modelo mínimo
+(seção 9 do plano) são criadas em RAG-011. A URL de conexão nunca é
+hardcoded em `alembic.ini`: `migrations/env.py` a monta a partir de
+`packages/config/settings.py` (RAG-004), usando o mesmo engine
+assíncrono (`asyncpg`) que a aplicação. `adapters/postgres/engine.py`
+expõe `get_engine()`/`get_session_factory()`/`get_session()`
+(cacheados por processo), consumidos pela aplicação a partir de RAG-012.
+
+Para gerar o SQL das migrations sem se conectar a um banco (útil para
+revisão em PR): `.venv/bin/alembic upgrade head --sql`.
+
+## API (RAG-005)
+
+
+Com os serviços do `docker compose` (RAG-003) no ar e um `.env` válido
+(RAG-004), suba a API com `make run-api` e teste:
 
 ```bash
 curl http://localhost:8000/health/live
-curl -i http://localhost:8000/health/ready   # 200 se Postgres/Redis/MinIO OK, 503 com detalhe caso contrário
+# {"status": "ok"}
+
+curl -i http://localhost:8000/health/ready
+# 200 se Postgres, Redis e MinIO estiverem alcançáveis; 503 caso contrário,
+# com o detalhe de qual dependência falhou (nunca stack trace ou credencial):
+# {"status": "error", "checks": {"postgres": "ok", "redis": "error", "minio": "ok"}}
 ```
 
-Comandos de qualidade (rodam sobre `apps/`, `packages/`, `adapters/`, `tests/`):
+`/health/live` nunca depende de Postgres/Redis/MinIO — verifica só que o
+processo está no ar, para não ser derrubado por uma falha temporária de
+uma dependência (isso é papel do `/health/ready`). Endpoints de negócio
+(`/v1/...`) chegam a partir de RAG-012.
+
+## Tratamento de erros (RAG-013)
+
+
+Qualquer erro em um endpoint de negócio vira
+[Problem Details](https://www.rfc-editor.org/rfc/rfc7807) (RFC 7807,
+`application/problem+json`), nunca uma stack trace:
 
 ```bash
-make lint       # ruff check + ruff format --check
-make typecheck  # mypy
-make test       # pytest com relatório de cobertura (gate mínimo: 85%,
-                # elevado a partir de RAG-004, quando o primeiro código
-                # de aplicação real passou a existir)
-make check      # lint + typecheck + test — o pipeline local completo
+curl -i http://localhost:8000/qualquer-rota-que-nao-existe
+# HTTP/1.1 404 Not Found
+# content-type: application/problem+json
+# x-request-id: 3fa2c1c0-...
+#
+# {"type": "about:blank", "title": "Not Found", "status": 404,
+#  "instance": "/qualquer-rota-que-nao-existe", "request_id": "3fa2c1c0-..."}
 ```
 
-Para mintar um token JWT de desenvolvimento (modo local simulado, ver `IMPLEMENTATION.md`):
+- `packages/application/errors.py`: categorias de erro independentes de
+  HTTP (`NotFoundError`, `ConflictError`, etc.) — usadas pelos casos de
+  uso, sem nenhum acoplamento a FastAPI.
+- `packages/contracts/problem_details.py`: o schema `ProblemDetail`
+  (Pydantic) que toda resposta de erro segue.
+- `apps/api/errors.py`: traduz cada erro de aplicação (e também
+  `DomainError`/`InvalidStatusTransitionError` de RAG-010, sempre como
+  409; `HTTPException`; erros de validação do Pydantic; e qualquer
+  exceção não tratada, como 500) para Problem Details, e atribui um
+  `request_id` de correlação a cada requisição (lido de `X-Request-ID`
+  se o cliente enviar um, senão gerado) — presente tanto no corpo quanto
+  no header `X-Request-ID` da resposta, em qualquer status.
+- `/health/live` e `/health/ready` (RAG-005) mantêm o próprio formato
+  (`{"status": ..., "checks": {...}}`) — são um contrato à parte, não
+  endpoints de negócio.
+
+## Bases de conhecimento (RAG-012)
+
+
+Endpoints de `/v1/knowledge-bases` (seção 10.1 do plano):
+
+| Método | Rota | O que faz |
+| --- | --- | --- |
+| `POST` | `/v1/knowledge-bases` | cria (201) |
+| `GET` | `/v1/knowledge-bases` | lista, paginado por cursor (200) |
+| `GET` | `/v1/knowledge-bases/{id}` | consulta (200) |
+| `PATCH` | `/v1/knowledge-bases/{id}` | atualização parcial (200) |
+| `DELETE` | `/v1/knowledge-bases/{id}` | exclusão lógica (204) |
+
+Decisões e limitações:
+
+- **Isolamento por tenant via JWT autenticado (RAG-050/RAG-051).**
+  `tenant_id` é resolvido a partir de um `Authorization: Bearer <token>`
+  verificado (`apps/api/dependencies.py::get_current_tenant_id` →
+  `get_current_identity` → `TokenVerifierPort`, RAG-050); token ausente,
+  malformado, inválido, ou sem a claim `tenant_id`, vira 401. O
+  cabeçalho `X-Tenant-Id` provisório do RAG-012 não existe mais — ver
+  "Autorização e contexto do tenant (RAG-051)" abaixo.
+- **Toda consulta ao banco recebe `tenant_id` explicitamente**
+  (`packages/application/ports/knowledge_base_repository.py`). Uma
+  base de outro tenant é tratada exatamente como inexistente — 404,
+  nunca 403 — para não vazar a existência de recursos alheios.
+- **Arquitetura em portas e adaptadores**: `KnowledgeBaseRepositoryPort`
+  (`packages/application/ports/`) tem dois adapters —
+  `InMemoryKnowledgeBaseRepository` (usado nos testes) e
+  `PostgresKnowledgeBaseRepository` (usado pela API) — mesmo padrão do
+  object storage (RAG-020). Comandos (escrita) e consultas (leitura)
+  ficam em `packages/application/commands|queries/knowledge_base.py` e
+  traduzem falhas do repositório para os erros de aplicação de RAG-013
+  (`NotFoundError`, `ConflictError`, `UnprocessableEntityError`).
+- **Paginação por cursor** (seção 8 do plano): o cursor é um par opaco
+  `(created_at, id)` codificado como string; `GET
+  /v1/knowledge-bases?limit=N&cursor=...` devolve até `N` itens e um
+  `next_cursor` (`null` na última página).
+- **`PATCH` é parcial de verdade**: só os campos enviados no corpo são
+  alterados (`exclude_unset`). `description` aceita `null` explícito
+  (limpa o campo); `name`/`config` enviados como `null` viram 422 —
+  o domínio não permite nome vazio nem config nula.
+- **`PostgresKnowledgeBaseRepository` não tem teste de integração
+  neste sandbox** (mesma limitação já documentada em
+  `adapters/postgres/engine.py`, RAG-006, e em `test_schema.py`,
+  RAG-011: nenhum teste de PR chama infraestrutura real). O contrato
+  da porta — incluindo os critérios de aceite desta atividade
+  (paginação, isolamento por tenant) — é validado via
+  `InMemoryKnowledgeBaseRepository`, que segue exatamente as mesmas
+  regras.
+
+## CI (RAG-070)
+
+
+Toda pull request contra `master` roda `.github/workflows/pull-request.yml`,
+com quatro jobs independentes (rodam em paralelo):
+
+| Job | Equivalente local | O que valida |
+| --- | --- | --- |
+| Lint (Ruff) | `make lint` | formatação e regras de lint |
+| Typecheck (Mypy) | `make typecheck` | tipagem estática |
+| Testes unitários e OpenAPI | `make test` + `app.openapi()` | testes, cobertura >= 85%, schema OpenAPI válido |
+| Validar migrations | `alembic upgrade head --sql` | grafo de revisões do Alembic, sem precisar de um banco real |
+
+Os artefatos de teste (`pytest-report.xml`, `coverage.xml`) são publicados
+no job de testes mesmo quando ele falha, para facilitar o diagnóstico.
+
+**Importante — configuração manual pendente:** o workflow por si só não
+bloqueia merge; isso depende de uma *branch protection rule* no GitHub
+(Settings -> Branches -> Add rule para `master` -> "Require status checks
+to pass before merging", marcando os quatro jobs acima). Esse passo
+precisa ser feito por quem tem permissão de administrar o repositório.
+
+Escopo desta atividade (RAG-070): apenas o workflow de PR. Secret
+scanning/SAST/SCA (RAG-071), build e publicação de imagens no GHCR
+(RAG-072) e o quality gate de avaliação RAG (RAG-073) ficam para
+atividades seguintes, como o backlog já prevê.
+
+## Segurança no CI (RAG-071)
+
+
+`.github/workflows/security.yml` roda em toda PR contra `master`, em
+paralelo a `pull-request.yml`, com cinco jobs:
+
+| Job | Ferramenta | O que valida | Bloqueia quando |
+| --- | --- | --- | --- |
+| Secret scanning | [gitleaks](https://github.com/gitleaks/gitleaks) | histórico completo do git em busca de segredos | qualquer segredo encontrado |
+| SAST | [bandit](https://bandit.readthedocs.io/) (`make security`) | código próprio (`apps`, `packages`, `adapters`) | achado de severidade **HIGH** (LOW/MEDIUM ficam visíveis no log, sem bloquear) |
+| SCA | [pip-audit](https://github.com/pypa/pip-audit) (`make security`) | dependências instaladas contra bases de advisories conhecidas | qualquer vulnerabilidade conhecida |
+| Lint de Dockerfile | [hadolint](https://github.com/hadolint/hadolint) | todo `Dockerfile*` do repositório (`Dockerfile.api`/`Dockerfile.worker`, RAG-072) | regra de nível **error** |
+| Exceções de segurança | `scripts/check_security_exceptions.py` (`make security`) | `security/exceptions.yml` | entrada sem justificativa/prazo, ou prazo vencido |
+
+Decisões e limitações:
+
+- **Exceções exigem prazo e justificativa.** Uma supressão pontual (um
+  `# nosec` do bandit, uma entrada na allowlist do `.gitleaks.toml`, um
+  `--ignore-vuln` do pip-audit, uma regra em `ignored:` no
+  `.hadolint.yaml`) só é legítima se tiver uma entrada correspondente
+  em `security/exceptions.yml` com `justification` e `expires`
+  (`AAAA-MM-DD`). O job falha a PR se uma entrada estiver incompleta
+  ou vencida — a exceção precisa ser renovada ou o achado corrigido.
+- **pip-audit trata toda vulnerabilidade conhecida como bloqueante.**
+  As bases de advisories do ecossistema Python nem sempre expõem um
+  nível de severidade consistente; tratar qualquer achado como
+  bloqueante é o padrão mais seguro. Foi assim que esta atividade
+  encontrou e corrigiu o PYSEC-2026-1845 (pytest < 9.0.3):
+  o teto de versão do `pytest` em `pyproject.toml` foi elevado de
+  `<9.0` para `<10.0`.
+- **gitleaks e hadolint são binários baixados no workflow** (não
+  pacotes Python), por isso não entram em `make security` — rode-os
+  manualmente se quiser reproduzir localmente (versões pinadas em
+  `.github/workflows/security.yml`).
+- **Lint de Dockerfile escaneia `Dockerfile.api`/`Dockerfile.worker`**
+  (RAG-072). O job continua localizando `Dockerfile*` dinamicamente em
+  vez de nomear os arquivos — passa sem erro se um dia nenhum existir,
+  sem exigir mudança no workflow quando um novo Dockerfile aparecer.
+
+## Domínio (RAG-010)
+
+
+`packages/domain` contém as regras de negócio puras do produto (sem
+dependência de frameworks de infraestrutura), conforme a seção 9 do plano:
+
+- `entities/`: `Tenant`, `KnowledgeBase`, `Document`, `DocumentVersion`,
+  `Chunk`, `IndexJob`, `QueryLog` (+ `TokenUsage`), `QueryEvidence`,
+  `Feedback`, `EvaluationRun`. Todas são modelos Pydantic imutáveis
+  (`frozen=True`, sem campos extras).
+- `enums/`: os enums de status/tipo usados pelas entidades acima
+  (`DocumentStatus`, `TenantStatus`, `KnowledgeBaseStatus`,
+  `ProcessingStatus`, `IndexJobType`, `FeedbackRating`).
+- `exceptions/`: `DomainError` (base) e `InvalidStatusTransitionError`,
+  levantada quando uma transição de estado não é permitida.
+- `services/`: reservado para regras que orquestram múltiplas entidades;
+  ainda vazio — a única máquina de estados desta atividade
+  (`Document.transition_to`) vive na própria entidade.
+
+Convenções compartilhadas (seção 8 do plano), aplicadas via tipos
+`Annotated` em `entities/base.py`:
+
+- `EntityId`: `UUID` que precisa ser versão 4.
+- `UtcDateTime`: `datetime` que precisa ser timezone-aware e estar em UTC.
+
+### Máquina de estados de `Document`
+
+As transições permitidas seguem exatamente o diagrama da seção 9.1 do
+plano:
+
+```
+PENDING -> PROCESSING -> INDEXED
+                      -> FAILED
+                      -> QUARANTINED
+INDEXED -> PROCESSING -> INDEXED
+Qualquer estado (exceto DELETED) -> DELETED
+```
+
+`Document.transition_to(novo_status)` devolve uma nova instância (a
+entidade é imutável) ou levanta `InvalidStatusTransitionError` para
+qualquer transição fora dessa lista — incluindo, deliberadamente, um
+caminho de retry a partir de `FAILED`/`QUARANTINED`, que o plano não
+descreve.
+
+Rodar só os testes de domínio:
 
 ```bash
-python scripts/mint_local_dev_token.py --subject dev-user --tenant-id 11111111-1111-1111-1111-111111111111
+.venv/bin/pytest tests/unit/test_document.py tests/unit/test_domain_entities.py -q
 ```
 
-## Documentação adicional
+## Schema inicial (RAG-011)
 
-- [`IMPLEMENTATION.md`](IMPLEMENTATION.md) — decisões de design, limitações conhecidas e testes de cada atividade já implementada.
-- [`rag-platform-llm-implementation-plan.md`](rag-platform-llm-implementation-plan.md) — backlog, requisitos funcionais/não funcionais e critérios de aceite de referência.
+
+A migration `0002_create_core_schema` cria as 10 tabelas do modelo
+mínimo (uma por entidade de RAG-010), a partir dos modelos ORM em
+`adapters/postgres/models/` — modelos de persistência, não as entidades
+de domínio (que continuam sem depender de SQLAlemy/pgvector, seção 5.1
+do plano).
+
+```bash
+.venv/bin/alembic upgrade head        # com o compose (RAG-003) no ar
+.venv/bin/alembic upgrade head --sql  # gera o SQL sem se conectar a nada
+```
+
+Decisões e limites conhecidos desta atividade:
+
+- **Isolamento por tenant:** `knowledge_bases`, `chunks` e `query_logs`
+  carregam `tenant_id` diretamente (NOT NULL, FK, índice próprio — são
+  as únicas entidades de RAG-010 com esse campo). As demais tabelas
+  (`documents`, `document_versions`, `index_jobs`, `feedbacks`,
+  `query_evidences`) chegam até um tenant por join através de suas FKs.
+  `tests/unit/test_schema.py` verifica isso a nível de schema; um teste
+  de isolamento fim a fim contra um Postgres real fica para
+  `tests/integration/`.
+- **`chunks.embedding` não tem dimensão fixa ainda**: o modelo/alias de
+  embeddings só é escolhido em RAG-025, e um índice pgvector (ivfflat/
+  hnsw) exige uma dimensão fixa para existir. Por isso RAG-011 não cria
+  esse índice — isso é RAG-030 ("usa índice pgvector"). Pelo mesmo
+  motivo, a busca lexical (RAG-031, "índice GIN utilizado") também não
+  ganha aqui uma coluna `tsvector`/índice GIN.
+- `documents.active_version_id` e `document_versions.document_id` se
+  referenciam mutuamente; a FK circular usa `use_alter=True` (ver
+  comentário em `adapters/postgres/models/document.py`).
+- Enums do domínio (RAG-010) viram `VARCHAR + CHECK` no banco
+  (`native_enum=False`), não um tipo `ENUM` nativo do Postgres — mais
+  simples de alterar depois (adicionar um valor é só migrar o CHECK).
+
+## Armazenamento de objetos (RAG-020)
+
+
+`packages/application/ports/object_storage.py` define `ObjectStoragePort`
+(upload/download/delete) — casos de uso futuros (RAG-021+) dependem só
+dela, nunca de um SDK de storage concreto (seção 5.1 do plano). Dois
+adapters implementam a mesma porta:
+
+- `adapters/object_storage/s3_object_storage.py` (`S3ObjectStorage`):
+  implementação real, via `aioboto3`, contra o MinIO do `docker compose`
+  (RAG-003) — funciona igual contra um S3 de verdade, só o
+  `endpoint_url` muda.
+- `adapters/object_storage/in_memory.py` (`InMemoryObjectStorage`): fake
+  em memória para testes/desenvolvimento local, sem precisar de MinIO no
+  ar.
+
+Decisões desta atividade:
+
+- **Sanitização de key** (`sanitize_object_key`, no módulo da porta —
+  decidir o que é uma key segura independe de qual adapter a implementa):
+  normaliza unicode, remove segmentos de path traversal (`.`/`..`),
+  troca caracteres fora de `[\w.-]` por `_` e rejeita (`InvalidObjectKeyError`)
+  um nome que sanitize para vazio ou exceda 1024 bytes.
+- **Checksum**: `upload()` sempre devolve o SHA-256 calculado sobre os
+  bytes enviados (`StoredObject.checksum_sha256`) — quem chama compara
+  com o checksum esperado (ex.: `Document.checksum`, RAG-010) para
+  detectar corrupção; a porta em si não tem um checksum "esperado" para
+  validar sozinha.
+- **Exclusão idempotente**: `delete()` de uma key que não existe não é
+  erro (contrato da porta, refletido nos dois adapters).
+
+Validação: como não tenho um MinIO real acessível daqui, `S3ObjectStorage`
+é testado com o cliente `aioboto3` mockado (`tests/unit/test_object_storage_s3.py`)
+— prova que o adapter monta as chamadas certas e traduz `ClientError`
+(`NoSuchKey`) para `ObjectNotFoundError`, não que o MinIO/S3 real
+funciona. Confirme upload/download/delete de verdade com o compose no
+ar (RAG-003).
+
+## Serviços locais (RAG-003)
+
+
+```bash
+cp .env.example .env   # opcional: ajuste credenciais/portas
+docker compose up -d
+docker compose ps      # aguarde todos os serviços ficarem "healthy"
+```
+
+| Serviço | Imagem | Porta padrão | Credenciais (dev) |
+| --- | --- | --- | --- |
+| PostgreSQL + pgvector | `pgvector/pgvector:pg16` | `5432` | `rag_platform` / `rag_platform_local_only` |
+| Redis | `redis:7.2-alpine` | `6379` | — |
+| MinIO (API / console) | `minio/minio` | `9000` / `9001` | `rag_platform` / `rag_platform_local_only` |
+| OpenTelemetry Collector (gRPC / HTTP / métricas) | `otel/opentelemetry-collector-contrib` | `4317` / `4318` / `8889` | — |
+| Prometheus | `prom/prometheus` | `9090` | — |
+| Grafana | `grafana/grafana` | `3000` | `admin` / `rag_platform_local_only` |
+
+Todas as portas e credenciais são configuráveis via `.env` (ver
+`.env.example`) e nunca devem ser reaproveitadas fora do ambiente local.
+Os dados de cada serviço são persistidos em volumes Docker nomeados
+(`postgres_data`, `redis_data`, `minio_data`, `prometheus_data`,
+`grafana_data`); `docker compose down -v` remove tudo, inclusive os dados.
+
+O Grafana já vem com o Prometheus provisionado como datasource; dashboards
+específicos da aplicação são adicionados em RAG-053. A extensão `vector`
+do PostgreSQL e as migrations do schema são responsabilidade de RAG-006 —
+neste momento a imagem apenas a disponibiliza, sem criá-la.
+
+A validação de configuração completa da aplicação (Pydantic Settings) é
+entregue em RAG-004; a API e os workers que efetivamente usam estes
+serviços chegam a partir de RAG-005.
+
+## Upload de documentos (RAG-021)
+
+
+`POST /v1/knowledge-bases/{knowledge_base_id}/documents` (multipart,
+campo `file`) implementa os passos 1-5 do fluxo de indexação (seção 11
+do plano): valida extensão/MIME type/tamanho, calcula SHA-256, detecta
+duplicidade, armazena o arquivo original (`ObjectStoragePort`, RAG-020)
+e cria `Document` (`PENDING`) + `DocumentVersion` (v1) + `IndexJob`
+(`INDEX`, `PENDING`) numa única transação — devolve `202 Accepted`. O
+job criado é publicado na fila (passo 6, RAG-022 — ver seção abaixo)
+logo em seguida, exceto numa repetição idempotente (nada novo foi
+criado, o job original já está — ou já foi — na fila).
+
+Formatos aceitos (fixos, seção 2 do plano — não configuráveis por
+ambiente): PDF, Markdown, TXT e DOCX; a extensão do arquivo precisa
+corresponder ao `Content-Type` declarado. `DOCUMENT_MAX_SIZE_BYTES`
+(`.env`, padrão 50 MiB) limita o tamanho — ambos violam com `422`.
+
+**Duplicidade**: um checksum já usado (não excluído) na mesma base
+retorna `409`. **Idempotência** (seção 8: "endpoints de criação devem
+aceitar Idempotency-Key"): o cabeçalho `Idempotency-Key` faz uma
+repetição da mesma requisição (mesmo nome/tipo/conteúdo) devolver o
+mesmo documento/versão/job já criados, sem duplicar nada; a mesma chave
+reusada para uma requisição diferente retorna `409`. O mapeamento vive
+em `document_idempotency_keys` (migration 0003) — não é uma entidade de
+domínio, é infraestrutura da aplicação.
+
+`packages/application/ports/document_repository.py` define
+`DocumentRepositoryPort`; `adapters/document_repository/postgres.py`
+documenta a limitação conhecida sob corrida genuína de
+`Idempotency-Key` (o caminho comum — retry sequencial — funciona
+corretamente; uma corrida verdadeiramente simultânea pode deixar um
+documento órfão, embora a resposta HTTP nunca divirja entre as duas
+requisições).
+
+Testes: `tests/unit/test_document_repository_in_memory.py` (contrato
+da porta), `tests/unit/test_document_upload_command.py` (validação,
+duplicidade, idempotência) e `tests/unit/test_document_router.py`
+(visão HTTP, isolamento por tenant).
+## Fila e worker de indexação (RAG-022)
+
+
+Implementa os passos 6-7 do fluxo de indexação (seção 11 do plano):
+publicar o `IndexJob` criado pelo RAG-021 numa fila e o worker adquirir
+um lock idempotente antes de processá-lo. A extração/normalização/
+chunking/embeddings/persistência em si (passos 8-14) ainda não existem
+— isso é RAG-023 a RAG-027.
+
+`packages/application/ports/job_queue.py` define `JobQueuePort`
+(`enqueue_index_job`) — só o `id` do job é publicado, nunca o payload;
+`adapters/queue/celery_job_queue.py` (`CeleryJobQueue`) publica via
+Celery/Redis (broker e result backend = `Settings.redis_url`).
+`adapters/queue/celery_app.py` mantém uma única app Celery compartilhada
+entre produtor (API) e consumidor (worker), sem broker configurado até
+`configure_celery_app(settings)` ser chamada explicitamente por quem
+tem um `Settings` válido — nunca no import do módulo, para que
+`adapters.queue`/`apps.indexing_worker` continuem importáveis sem
+nenhuma infraestrutura (RAG-001).
+
+`apps/indexing_worker/tasks.py` (`process_index_job_task`) é a task
+Celery: um adapter fino que só traduz a contagem de tentativas do
+Celery (`self.request.retries`) para uma chamada a
+`packages/application/commands/index_job.py::process_index_job_attempt`
+— a lógica de negócio de verdade, testável sem Celery nenhum:
+
+- Primeira tentativa: reivindica o job (`claim_index_job`, transição
+  atômica `PENDING -> RUNNING`) — o lock idempotente do passo 7. Se já
+  foi reivindicado por outro worker (ou não existe mais), não processa.
+- Sucesso: `mark_index_job_succeeded`.
+- Falha com tentativas restantes: registra a tentativa
+  (`mark_index_job_failed`, `final=False`) e levanta
+  `RetryableIndexJobError`, que a task Celery reagenda automaticamente
+  (`autoretry_for`) com backoff exponencial (`retry_backoff=True`,
+  jitter, teto de 10 min) — 5 tentativas no total, um ponto de partida
+  razoável (o plano não especifica o número).
+- Falha na última tentativa: registra como definitiva
+  (`mark_index_job_failed`, `final=True`, `status=FAILED`) e não
+  reagenda mais — o critério de aceite "falha definitiva é registrada".
+
+O processamento em si (`DocumentProcessorPort.process`) ainda não tem
+implementação real: `adapters/document_processor/not_implemented.py`
+é o placeholder usado em produção até o RAG-023 existir — todo job
+enfileirado hoje falha definitivamente de propósito, nunca "sucede"
+silenciosamente sem processar nada.
+
+`apps/indexing_worker/worker.py` é o ponto de entrada real do processo
+(`celery -A apps.indexing_worker.worker worker`) — só ele lê `Settings`
+de verdade; `apps/indexing_worker/tasks.py` e `adapters/queue/celery_app.py`
+continuam importáveis sem nenhuma configuração.
+
+Testes: `tests/unit/test_index_job_processing.py` (reivindicação,
+sucesso, retry, falha definitiva — sem Celery), `tests/unit/test_celery_job_queue.py`
+(adapter produtor) e `tests/unit/test_indexing_worker_task.py` (fiação
+da task Celery: nome registrado, configuração de retry, repasse de
+`self.request.retries`).
+## Autenticação JWT (RAG-050)
+
+
+`packages/application/ports/token_verifier.py` define `TokenVerifierPort`
+(`verify(token) -> TokenClaims`) — casos de uso e a API dependem só dela,
+nunca de PyJWT ou de um SDK de IdP concreto (seção 5.1 do plano).
+`adapters/token_verifier/pyjwt_verifier.py` (`PyJWTTokenVerifier`) é a
+implementação via PyJWT: valida assinatura, issuer, audience e
+expiração (com tolerância de relógio configurável, `JWT_LEEWAY_SECONDS`)
+e extrai `subject`/`tenant_id`/`issuer`/`expires_at`; qualquer falha
+vira `AuthenticationError` (RAG-013) com um detalhe genérico — nunca diz
+*por que* o token falhou, para não dar a um atacante um oráculo.
+
+Configuração (`packages/config/settings.py`, `.env.example`):
+`JWT_ALGORITHM` (padrão `HS256`), `JWT_SECRET` (obrigatório para
+algoritmos `HS*`), `JWT_PUBLIC_KEY` (obrigatório para `RS*`/`ES*`/`PS*`),
+`JWT_ISSUER` e `JWT_AUDIENCE` (obrigatórios, sem default — como as
+senhas de RAG-004, forçam configuração explícita em vez de um valor
+"que sempre funciona").
+
+**Modo local simulado** (seção 13 do plano: "em modo local, provedor de
+identidade simulado e explicitamente identificado como não produtivo"):
+não há OIDC real, apenas um segredo compartilhado (`JWT_SECRET`,
+HS256) configurado via `.env`. `scripts/mint_local_dev_token.py` gera
+tokens válidos para testar a API localmente:
+
+```bash
+python scripts/mint_local_dev_token.py --subject dev-user \
+    --tenant-id 11111111-1111-1111-1111-111111111111
+```
+
+Nunca reutilize `JWT_SECRET`/`JWT_ISSUER` de desenvolvimento em
+development ou production — lá, use um algoritmo assimétrico
+(`JWT_ALGORITHM=RS256` + `JWT_PUBLIC_KEY` da chave pública do IdP real)
+com o segredo gerenciado por secret manager.
+
+Esta atividade entrega a verificação do token (assinatura, issuer,
+audience, expiração — critério de aceite desta atividade). A troca de
+`get_current_tenant_id` para resolver o tenant a partir de um token
+verificado (em vez do cabeçalho `X-Tenant-Id` provisório do RAG-012), e
+a prova de ausência de vazamento entre tenants, são RAG-051 (próxima
+seção).
+
+Testes: `tests/unit/test_token_verifier.py` (assinatura errada, issuer/
+audience errados, expiração, leeway, claims obrigatórias ausentes,
+`tenant_id` malformado, confusão de algoritmo, erros de configuração) e
+`tests/unit/test_mint_local_dev_token.py`.
+## Autorização e contexto do tenant (RAG-051)
+
+
+`apps/api/dependencies.py` agora resolve identidade e tenant sempre a
+partir de um JWT autenticado, nunca de um cabeçalho não verificado:
+
+- `get_current_identity` exige `Authorization: Bearer <token>` e
+  delega a verificação a `TokenVerifierPort` (RAG-050) — cabeçalho
+  ausente, esquema diferente de `Bearer`, ou token que `verify()`
+  rejeite, viram 401.
+- `get_current_tenant_id` depende de `get_current_identity` e exige que
+  a claim `tenant_id` esteja presente — a porta permite `tenant_id:
+  None` (nem todo token de acesso precisa identificar um tenant), mas
+  todo endpoint de negócio desta API opera em nome de exatamente um
+  tenant, então esta função torna a claim obrigatória. Um token válido
+  sem `tenant_id` também vira 401 (não é uma questão de permissão — o
+  token não carrega a informação mínima exigida).
+
+A assinatura usada pelos routers (`Depends(get_current_tenant_id)`) não
+mudou — só a implementação por trás dela, exatamente como planejado no
+RAG-050. `packages/application/ports/knowledge_base_repository.py` e
+`document_repository.py` já exigiam `tenant_id` explicitamente em todo
+método desde o RAG-012/RAG-021; esta atividade não precisou alterá-los.
+
+O cabeçalho `X-Tenant-Id` provisório do RAG-012 foi removido — chamadas
+à API agora exigem um JWT válido (ver "Autenticação JWT (RAG-050)"
+acima para como mintar um token local com `scripts/mint_local_dev_token.py`).
+
+Testes: `tests/unit/test_dependencies.py` (unidade — cabeçalho ausente,
+esquema inválido, token inválido, token sem `tenant_id`, resolução
+correta da identidade/tenant) e as suítes de isolamento entre tenants
+em `tests/unit/test_knowledge_base_router.py` e
+`tests/unit/test_document_router.py`, migradas de `X-Tenant-Id` para
+tokens JWT reais.
+## Prompt de resposta (RAG-040)
+
+
+`config/prompts/answer.v1.yaml` é o prompt de resposta fundamentada,
+versionado por convenção (seção 8 do plano): uma versão publicada é
+imutável, uma mudança de conteúdo sempre cria `answer.v2.yaml`, nunca
+edita a existente. `packages/generation/prompts.py::load_prompt(id,
+version)` carrega e valida esse YAML — nada aqui assume "a versão
+atual" implicitamente, todo carregamento pede `id`/`version`
+explícitos; `get_default_answer_prompt()` é o único lugar que decide
+qual versão a aplicação usa hoje.
 
 O prompt é estruturado em campos, não um texto livre único, para que os
 requisitos de aceite sejam verificáveis independentemente:
@@ -229,6 +614,7 @@ para id/versão inexistente, erro de inconsistência id/versão-vs-nome-de-arqui
 cache por `(id, version)` e imutabilidade.
 
 ## Extração de conteúdo (RAG-023)
+
 
 Implementa o passo 8 do fluxo de indexação (seção 11 do plano):
 extrair texto e metadados de um documento já em memória (baixado do
@@ -293,6 +679,7 @@ exige).
 
 ## Normalização e chunking (RAG-024)
 
+
 Implementa os passos 9-10 do fluxo de indexação (seção 11 do plano):
 normalizar o texto extraído (RAG-023) sem perder estrutura semântica e
 dividi-lo em chunks determinísticos, seguindo os defaults da seção
@@ -353,6 +740,7 @@ pedaços consecutivos) e a fusão por mínimo sem duplicar a sobreposição
 
 ## Embeddings via LiteLLM (RAG-025)
 
+
 Implementa o passo 11 do fluxo de indexação (seção 11 do plano):
 "gerar embeddings em lotes". Persistência e ativação de versão (passos
 12-14) continuam sem implementação — RAG-026/027.
@@ -410,6 +798,7 @@ real. `tests/unit/test_model_config.py` cobre o carregador de alias
 (mesmos critérios de `test_prompts.py`).
 
 ## Persistência de chunks e ativação de versão (RAG-026)
+
 
 Implementa os passos 8-14 do fluxo de indexação (seção 11 do plano):
 extração, chunking, embeddings, persistência e ativação de versão,
@@ -485,6 +874,7 @@ versão, base de conhecimento ausente).
 
 ## Status de indexação e reindexação (RAG-027)
 
+
 Implementa o objetivo do épico E2 restante: expor o status de um job
 de indexação ao cliente e permitir disparar uma nova indexação sem
 subir um arquivo de novo.
@@ -529,6 +919,7 @@ novas funções em `tests/unit/test_document_router.py` cobrem a visão
 HTTP dos dois endpoints (200/202/401/404/409).
 
 ## Busca lexical (RAG-031)
+
 
 Implementa a recuperação de chunks por PostgreSQL Full Text Search —
 o objetivo do épico E3 que não dependia de nenhuma decisão de produto
@@ -592,6 +983,7 @@ documentada para os demais adapters Postgres deste projeto.
 
 ## Auditoria de ações administrativas (RAG-054)
 
+
 Registra um evento de auditoria (ator, tenant, ação, tipo/id de
 recurso, timestamp) para cada ação administrativa que já existe hoje
 na API: criar/atualizar/excluir base de conhecimento (RAG-012) e
@@ -639,6 +1031,7 @@ classe `TestAuditLog` provando que a ação HTTP correspondente
 registrou exatamente um evento com o ator/tenant/ação/recurso
 esperados.
 ## Tracing distribuído (RAG-052)
+
 
 Instrumenta a API e o worker de indexação com OpenTelemetry, cobrindo
 o fluxo upload -> indexação de ponta a ponta (a API publica o
@@ -701,6 +1094,7 @@ verificação manual via `docker compose up` — nenhum teste de pull
 request sobe infraestrutura real (seção 1 do plano).
 
 ## Busca vetorial e provisionamento do gateway de embeddings (RAG-030)
+
 
 Destrava a decisão de produto deixada propositalmente em aberto no
 RAG-025/RAG-011 (ver seções acima): qual modelo de embeddings vive por
@@ -774,6 +1168,7 @@ já documentada para os demais adapters Postgres deste projeto.
 
 ## Métricas Prometheus (RAG-053)
 
+
 Destrava com métricas o mesmo que RAG-052 destravou com traces: técnica
 (HTTP, Celery) e de consumo (negócio) — via OpenTelemetry, reaproveitando
 a infraestrutura de RAG-003 (Collector expondo `:8889` em formato
@@ -842,6 +1237,7 @@ funcionando). `test_knowledge_base_router.py`/`test_document_router.py`
 cobrem que cada endpoint chama a métrica certa.
 
 ## Publicação de imagens no GHCR (RAG-072)
+
 
 `.github/workflows/publish.yml` constrói e publica as imagens da API e
 do worker em `ghcr.io` a cada push em `master` — na prática, a cada PR
@@ -915,6 +1311,7 @@ real do workflow, após o merge — mesma limitação já documentada para
 os demais adapters/infra deste projeto que dependem de um ambiente
 real (Postgres, Collector) que este sandbox não tem.
 ## Reranker (RAG-033)
+
 
 Reordena os candidatos que já saíram da fusão RRF (RAG-032) por
 relevância de verdade em relação à query, via um cross-encoder —
@@ -991,6 +1388,7 @@ candidatos). `tests/unit/test_model_config.py` cobre o alias
 
 ## Endpoint retrieve (RAG-034)
 
+
 Primeiro endpoint HTTP da fase de geração (E4 do plano): expõe busca
 vetorial + busca lexical + fusão RRF (RAG-032) + reranking
 configurável (RAG-033) como uma única chamada síncrona, `POST
@@ -1059,6 +1457,63 @@ usado para criar a base de conhecimento de cada teste, registra
 auditoria por baixo dos panos — esquecer essa sobrescrita faz o teste
 tocar o `get_session`/`get_settings()` reais).
 
+## Context builder (RAG-041)
+
+
+Monta o texto de `CONTEXTO` do prompt de resposta (RAG-040) a partir
+das evidências que o endpoint `retrieve` (RAG-034) já buscou, fundiu
+por RRF (RAG-032) e reordenou pelo reranker (RAG-033) — o passo 10 da
+seção 12 do plano ("montar contexto dentro do orçamento de tokens"),
+o último antes de chamar o modelo (RAG-042).
+
+**Seleção em ordem de `position`, respeitando o orçamento**
+(`packages/generation/context_builder.py::build_context`): percorre as
+evidências da melhor posição para a pior (`position` crescente — `0`
+é o melhor candidato; a lista de entrada não precisa já vir ordenada
+assim, mesma postura defensiva de `retrieve_evidence` reclampando
+`top_k`) e inclui cada uma enquanto ela couber no `token_budget`
+restante — usa `Chunk.token_count`, já calculado na indexação
+(RAG-024), nunca retokeniza o texto aqui. Uma evidência grande demais
+para o orçamento restante é só pulada, nunca trunca o conteúdo do
+chunk para caber: cortar um chunk no meio produziria uma citação
+`[chunk_id]` referenciando um texto que o chunk recuperado, de
+verdade, não contém por inteiro — exatamente o que RAG-043 ("toda
+citação corresponde a chunk recuperado") existe para impedir. Uma
+evidência maior que o orçamento não bloqueia uma evidência menor e
+pior posicionada logo depois dela na lista.
+
+**"evita duplicações excessivas"** (critério de aceite): evidências
+com `chunk.content` idêntico a uma já incluída são descartadas —
+comparação exata, não uma heurística de similaridade (RRF, RAG-032,
+já deduplica o mesmo `chunk_id` repetido nos dois rankings de entrada;
+esta atividade só cobre o caso de dois `chunk_id` diferentes com o
+mesmo texto, por exemplo o mesmo trecho reindexado em duas versões do
+documento).
+
+**Formato de citação compatível com RAG-040**: o texto de contexto usa
+exatamente `[chunk_id] conteúdo`, o formato que `citation_instruction`
+(`config/prompts/answer.v1.yaml`) pede ao modelo para citar — um dos
+testes monta o contexto e chama `PromptTemplate.render()` de verdade
+para travar os dois módulos não divergirem silenciosamente. Não há
+"orçamento padrão de produção" decidido aqui: `token_budget` é sempre
+um parâmetro explícito de quem chama, porque o valor certo depende da
+janela de contexto do modelo que RAG-042 ainda vai escolher —
+`DEFAULT_TOKEN_BUDGET` existe só para testes e chamadas exploratórias.
+
+**Não decide "não há evidência suficiente"**: o limiar mínimo do passo
+9 da seção 12 e a resposta fixa de `no_evidence_response` (seção 12.1)
+não são responsabilidade deste módulo — aqui, nenhuma evidência
+couber no orçamento é uma saída legítima e silenciosa (`context_text`
+vazio); decidir o que fazer com um contexto vazio fica para quem
+monta o endpoint `query` (RAG-043/044).
+
+Testes: `tests/unit/test_context_builder.py` cobre lista vazia,
+evidência que cabe, evidência que estoura o orçamento, evidência
+grande demais não bloqueando uma menor depois dela, orçamento zero,
+deduplicação de conteúdo idêntico, ordenação por `position`
+independente da ordem de entrada, múltiplas evidências preservando
+ordem no texto final, e a integração de formato com
+`PromptTemplate.render()` (RAG-040).
 ## Dataset dourado de avaliação (RAG-060)
 
 Schema versionado de perguntas, respostas esperadas e evidências
@@ -1126,53 +1581,3 @@ cache por `(id, version)` e imutabilidade — e, construindo
 (pergunta sem resposta com evidência, pergunta respondível sem
 evidência, poucos casos, sem nenhuma pergunta sem resposta, IDs
 duplicados, campo desconhecido rejeitado por `extra="forbid"`).
-## Context builder (RAG-041)
-
-Monta o texto de `CONTEXTO` do prompt de resposta (RAG-040) a partir
-das evidências que o endpoint `retrieve` (RAG-034) já buscou, fundiu
-por RRF (RAG-032) e reordenou pelo reranker (RAG-033) — o passo 10 da
-seção 12 do plano ("montar contexto dentro do orçamento de tokens"),
-o último antes de chamar o modelo (RAG-042).
-
-**Seleção em ordem de `position`, respeitando o orçamento**
-(`packages/generation/context_builder.py::build_context`): percorre as
-evidências da melhor posição para a pior (`position` crescente — `0`
-é o melhor candidato; a lista de entrada não precisa já vir ordenada
-assim, mesma postura defensiva de `retrieve_evidence` reclampando
-`top_k`) e inclui cada uma enquanto ela couber no `token_budget`
-restante — usa `Chunk.token_count`, já calculado na indexação
-(RAG-024), nunca retokeniza o texto aqui. Uma evidência grande demais
-para o orçamento restante é só pulada, nunca trunca o conteúdo do
-chunk para caber: cortar um chunk no meio produziria uma citação
-`[chunk_id]` referenciando um texto que o chunk recuperado, de
-verdade, não contém por inteiro — exatamente o que RAG-043 ("toda
-citação corresponde a chunk recuperado") existe para impedir. Uma
-evidência maior que o orçamento não bloqueia uma evidência menor e
-pior posicionada logo depois dela na lista.
-
-**"evita duplicações excessivas"** (critério de aceite): evidências
-com `chunk.content` idêntico a uma já incluída são descartadas —
-comparação exata, não uma heurística de similaridade (RRF, RAG-032,
-já deduplica o mesmo `chunk_id` repetido nos dois rankings de entrada;
-esta atividade só cobre o caso de dois `chunk_id` diferentes com o
-mesmo texto, por exemplo o mesmo trecho reindexado em duas versões do
-documento).
-
-**Formato de citação compatível com RAG-040**: o texto de contexto usa
-exatamente `[chunk_id] conteúdo`, o formato que `citation_instruction`
-(`config/prompts/answer.v1.yaml`) pede ao modelo para citar — um dos
-testes monta o contexto e chama `PromptTemplate.render()` de verdade
-para travar os dois módulos não divergirem silenciosamente. Não há
-"orçamento padrão de produção" decidido aqui: `token_budget` é sempre
-um parâmetro explícito de quem chama, porque o valor certo depende da
-janela de contexto do modelo que RAG-042 ainda vai escolher —
-`DEFAULT_TOKEN_BUDGET` existe só para testes e chamadas exploratórias.
-
-**Não decide "não há evidência suficiente"**: o limiar mínimo do passo
-9 da seção 12 e a resposta fixa de `no_evidence_response` (seção 12.1)
-não são responsabilidade deste módulo — aqui, nenhuma evidência
-couber no orçamento é uma saída legítima e silenciosa (`context_text`
-vazio); decidir o que fazer com um contexto vazio fica para quem
-monta o endpoint `query` (RAG-043/044).
-
-32 das 48 atividades do backlog estão mescladas em `master`; detalhes de progresso por épico em [`IMPLEMENTATION.md`](IMPLEMENTATION.md#progresso-do-backlog).
